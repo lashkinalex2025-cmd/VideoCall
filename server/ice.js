@@ -67,6 +67,8 @@ async function getIceServers() {
     iceServers: buildOpenRelayIceServers(),
     iceTransportPolicy: 'all',
     iceCandidatePoolSize: 8,
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require',
     source: 'openrelay-staticauth',
   };
 }

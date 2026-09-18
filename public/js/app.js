@@ -198,6 +198,8 @@ async function loadIceConfig() {
         iceServers: cfg.iceServers,
         iceTransportPolicy: cfg.iceTransportPolicy || 'all',
         iceCandidatePoolSize: cfg.iceCandidatePoolSize || 8,
+        bundlePolicy: cfg.bundlePolicy || 'max-bundle',
+        rtcpMuxPolicy: cfg.rtcpMuxPolicy || 'require',
       };
     }
   } catch (err) {
@@ -332,16 +334,13 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
 function wireSocket() {
   const s = state.socket;
 
-  s.on('participant:joined', async (p) => {
+  s.on('participant:joined', (p) => {
     state.peers.set(p.id, p);
     renderPeople();
     updateChatTargets();
     toast(`${p.name} присоединился(ась)`);
-    // Не создаём offer здесь: новый участник сам звонит нам.
-    // Готовим PC без initiator, чтобы быстрее принять его offer (опционально).
-    if (state.call) {
-      await state.call.connectToPeer(p.id, { initiator: false });
-    }
+    // Не трогаем WebRTC здесь: оффер шлёт только новый участник.
+    // Иначе glare / одностороннее видео (хост ↔ планшет).
     renderVideos();
   });
 
@@ -450,6 +449,36 @@ function updateRoomHeader() {
     (state.room.hasPassword ? ' · 🔒' : '');
 }
 
+/**
+ * Safari/iPad часто блокирует autoplay чужого видео со звуком.
+ * Сначала play(), при отказе — временно mute → play → unmute.
+ */
+function ensureVideoPlaying(video, { remote = false } = {}) {
+  const tryPlay = () => {
+    const p = video.play();
+    if (!p || !p.then) return;
+    p.catch(() => {
+      if (!remote) return;
+      const wasMuted = video.muted;
+      video.muted = true;
+      video.play()
+        .then(() => {
+          // После успешного старта пробуем включить звук
+          setTimeout(() => {
+            video.muted = wasMuted;
+            video.play().catch(() => {
+              video.muted = true;
+            });
+          }, 300);
+        })
+        .catch(() => {});
+    });
+  };
+  tryPlay();
+  video.addEventListener('loadedmetadata', tryPlay, { once: true });
+  video.addEventListener('canplay', tryPlay, { once: true });
+}
+
 function renderVideos() {
   const grid = $('#videoGrid');
   if (!state.self) return;
@@ -511,14 +540,16 @@ function renderVideos() {
     }
 
     tile.className = 'tile' + (e.self ? ' self' : '') + (e.screenSharing ? ' screen-share' : '');
+    // Своё — всегда muted (без эха). Чужое — со звуком, но с fallback для Safari.
     video.muted = Boolean(e.self);
     if (e.self) video.setAttribute('muted', 'true');
+    else video.removeAttribute('muted');
 
     if (e.stream && video.srcObject !== e.stream) {
       video.srcObject = e.stream;
-      const play = () => video.play().catch(() => {});
-      play();
-      video.addEventListener('loadedmetadata', play, { once: true });
+      ensureVideoPlaying(video, { remote: !e.self });
+    } else if (e.stream) {
+      ensureVideoPlaying(video, { remote: !e.self });
     }
 
     const meta = tile.querySelector('.tile-meta');
