@@ -8,6 +8,8 @@ const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 const { ensureCerts, listLocalIPs } = require('./https');
 const { getIceServers } = require('./ice');
+const store = require('./store');
+const admin = require('./admin');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
@@ -99,6 +101,63 @@ function defaultPermissions() {
   };
 }
 
+function persistRoom(room, createdBy = 'system') {
+  const existing = store.getConference(room.id);
+  store.upsertConference({
+    id: room.id,
+    name: room.name,
+    passwordHash: room.passwordHash,
+    permissions: { ...room.permissions },
+    createdAt: existing?.createdAt || room.createdAt || Date.now(),
+    updatedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    createdBy: existing?.createdBy || createdBy,
+  });
+}
+
+function createRuntimeRoom({ id, name, passwordHash, permissions, createdAt }) {
+  /** @type {Room} */
+  const room = {
+    id,
+    name: name || 'Конференция',
+    passwordHash: passwordHash || null,
+    hostId: '',
+    participants: new Map(),
+    permissions: { ...defaultPermissions(), ...(permissions || {}) },
+    createdAt: createdAt || Date.now(),
+    chatHistory: [],
+    transcriptSegments: [],
+  };
+  rooms.set(id, room);
+  return room;
+}
+
+function ensureRuntimeRoom(roomId) {
+  let room = rooms.get(roomId);
+  if (room) return room;
+  const stored = store.getConference(roomId);
+  if (!stored) return null;
+  return createRuntimeRoom(stored);
+}
+
+function conferenceListItem(conf) {
+  const live = rooms.get(conf.id);
+  const participantCount = live ? live.participants.size : 0;
+  return {
+    id: conf.id,
+    name: conf.name,
+    hasPassword: Boolean(conf.passwordHash),
+    permissions: conf.permissions || defaultPermissions(),
+    createdAt: conf.createdAt,
+    updatedAt: conf.updatedAt,
+    lastActivityAt: conf.lastActivityAt,
+    createdBy: conf.createdBy || 'system',
+    participantCount,
+    active: participantCount > 0,
+    link: `/?room=${encodeURIComponent(conf.id)}`,
+  };
+}
+
 function publicParticipant(p) {
   return {
     id: p.id,
@@ -172,7 +231,7 @@ app.get('/api/info', (_req, res) => {
 });
 
 app.get('/api/rooms/:id', (req, res) => {
-  const room = rooms.get(req.params.id);
+  const room = ensureRuntimeRoom(req.params.id);
   if (!room) return res.status(404).json({ error: 'Комната не найдена' });
   res.json({
     id: room.id,
@@ -192,29 +251,155 @@ app.post('/api/rooms', async (req, res) => {
       .replace(/[^a-zA-Z0-9_-]/g, '')
       .slice(0, 32) || uuidv4().slice(0, 8);
 
-    if (rooms.has(roomId)) {
+    if (rooms.has(roomId) || store.getConference(roomId)) {
       return res.status(409).json({ error: 'Комната с таким ID уже существует' });
     }
 
     const passwordHash = password ? await bcrypt.hash(password, 10) : null;
-    /** @type {Room} */
-    const room = {
+    const room = createRuntimeRoom({
       id: roomId,
       name,
       passwordHash,
-      hostId: '',
-      participants: new Map(),
       permissions: defaultPermissions(),
       createdAt: Date.now(),
-      chatHistory: [],
-      transcriptSegments: [],
-    };
-    rooms.set(roomId, room);
+    });
+    persistRoom(room, 'user');
     res.json({ id: roomId, name, hasPassword: Boolean(passwordHash) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не удалось создать комнату' });
   }
+});
+
+// ---------- Admin API ----------
+app.get('/api/admin/info', (_req, res) => {
+  res.json(admin.getAdminInfo());
+});
+
+app.post('/api/admin/login', (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '');
+  const result = admin.login(username, password);
+  if (!result.ok) return res.status(401).json(result);
+  res.json(result);
+});
+
+app.post('/api/admin/logout', admin.authMiddleware, (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : req.headers['x-admin-token'];
+  res.json(admin.logout(token));
+});
+
+app.get('/api/admin/conferences', admin.authMiddleware, (_req, res) => {
+  const list = store.listConferences().map(conferenceListItem);
+  res.json({ conferences: list, total: list.length });
+});
+
+app.post('/api/admin/conferences', admin.authMiddleware, async (req, res) => {
+  try {
+    const name = String(req.body?.name || 'Конференция').trim().slice(0, 80);
+    const password = req.body?.password ? String(req.body.password) : '';
+    const roomId = (req.body?.roomId ? String(req.body.roomId) : uuidv4().slice(0, 8))
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 32) || uuidv4().slice(0, 8);
+
+    if (rooms.has(roomId) || store.getConference(roomId)) {
+      return res.status(409).json({ error: 'Ссылка с таким ID уже существует' });
+    }
+
+    const passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    const room = createRuntimeRoom({
+      id: roomId,
+      name,
+      passwordHash,
+      permissions: defaultPermissions(),
+      createdAt: Date.now(),
+    });
+    persistRoom(room, req.admin.username);
+    res.json(conferenceListItem(store.getConference(roomId)));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось создать ссылку' });
+  }
+});
+
+app.patch('/api/admin/conferences/:id', admin.authMiddleware, async (req, res) => {
+  try {
+    const conf = store.getConference(req.params.id);
+    if (!conf) return res.status(404).json({ error: 'Ссылка не найдена' });
+
+    if (typeof req.body?.name === 'string' && req.body.name.trim()) {
+      conf.name = req.body.name.trim().slice(0, 80);
+    }
+    if (req.body?.password !== undefined) {
+      const password = String(req.body.password || '');
+      conf.passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    }
+    if (req.body?.permissions && typeof req.body.permissions === 'object') {
+      conf.permissions = { ...defaultPermissions(), ...conf.permissions, ...req.body.permissions };
+    }
+    conf.updatedAt = Date.now();
+    store.upsertConference(conf);
+
+    const live = rooms.get(conf.id);
+    if (live) {
+      live.name = conf.name;
+      live.passwordHash = conf.passwordHash;
+      live.permissions = { ...conf.permissions };
+      io.to(live.id).emit('room:permissions', live.permissions);
+      io.to(live.id).emit('room:meta', { hasPassword: Boolean(live.passwordHash), name: live.name });
+    }
+
+    res.json(conferenceListItem(conf));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось обновить ссылку' });
+  }
+});
+
+app.delete('/api/admin/conferences/:id', admin.authMiddleware, (req, res) => {
+  const id = req.params.id;
+  const live = rooms.get(id);
+  if (live) {
+    for (const p of live.participants.values()) {
+      io.to(p.socketId).emit('moderation:kicked', { reason: 'Конференция удалена администратором' });
+      const sock = io.sockets.sockets.get(p.socketId);
+      if (sock) {
+        sock.leave(id);
+        sock.data.roomId = null;
+        sock.data.participantId = null;
+      }
+    }
+    rooms.delete(id);
+  }
+  const ok = store.deleteConference(id);
+  if (!ok) return res.status(404).json({ error: 'Ссылка не найдена' });
+  res.json({ ok: true, id });
+});
+
+app.post('/api/admin/conferences/cleanup', admin.authMiddleware, (req, res) => {
+  const maxAgeHours = Number(req.body?.maxAgeHours);
+  const maxAgeMs = Number.isFinite(maxAgeHours) && maxAgeHours > 0
+    ? maxAgeHours * 60 * 60 * 1000
+    : 24 * 60 * 60 * 1000;
+
+  const activeIds = new Set(
+    [...rooms.values()].filter((r) => r.participants.size > 0).map((r) => r.id)
+  );
+  const result = store.cleanupUnused({ maxAgeMs, activeIds });
+
+  // Also drop idle runtime rooms that were removed from store
+  for (const id of result.removed) {
+    rooms.delete(id);
+  }
+
+  res.json({
+    ok: true,
+    removed: result.removed,
+    removedCount: result.removed.length,
+    remaining: result.kept,
+    maxAgeHours: maxAgeMs / (60 * 60 * 1000),
+  });
 });
 
 app.post('/api/report', async (req, res) => {
@@ -322,11 +507,12 @@ io.on('connection', (socket) => {
       const roomId = String(payload?.roomId || '').trim();
       const name = String(payload?.name || 'Гость').trim().slice(0, 40) || 'Гость';
       const password = payload?.password ? String(payload.password) : '';
-      const room = rooms.get(roomId);
+      const room = ensureRuntimeRoom(roomId);
 
       if (!room) {
-        return ack?.({ ok: false, error: 'Комната не найдена. Создайте её на главной странице.' });
+        return ack?.({ ok: false, error: 'Комната не найдена. Создайте её на главной или в кабинете администратора.' });
       }
+      store.touchConference(roomId);
       if (room.permissions.lockRoom && room.participants.size > 0) {
         return ack?.({ ok: false, error: 'Комната заблокирована хостом' });
       }
@@ -506,6 +692,7 @@ io.on('connection', (socket) => {
     for (const key of allowed) {
       if (typeof nextPerms?.[key] === 'boolean') room.permissions[key] = nextPerms[key];
     }
+    persistRoom(room, 'host');
     io.to(room.id).emit('room:permissions', room.permissions);
     ack?.({ ok: true, permissions: room.permissions });
   });
@@ -570,6 +757,7 @@ io.on('connection', (socket) => {
     if (!isHost(participant)) return ack?.({ ok: false, error: 'Только хост' });
     const password = payload?.password ? String(payload.password) : '';
     room.passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    persistRoom(room, 'host');
     io.to(room.id).emit('room:meta', { hasPassword: Boolean(room.passwordHash) });
     ack?.({ ok: true, hasPassword: Boolean(room.passwordHash) });
   });
@@ -580,6 +768,7 @@ io.on('connection', (socket) => {
     const { room, participant } = ctx;
     room.participants.delete(participant.id);
     socket.to(room.id).emit('participant:left', { id: participant.id });
+    store.touchConference(room.id);
 
     if (participant.role === 'host' && room.participants.size > 0) {
       const next = [...room.participants.values()][0];
@@ -589,10 +778,14 @@ io.on('connection', (socket) => {
       io.to(room.id).emit('room:host-changed', { hostId: next.id });
     }
 
+    // Unload empty runtime room from memory, but keep persistent link in store
     if (room.participants.size === 0) {
       setTimeout(() => {
         const current = rooms.get(room.id);
-        if (current && current.participants.size === 0) rooms.delete(room.id);
+        if (current && current.participants.size === 0) {
+          persistRoom(current, 'system');
+          rooms.delete(room.id);
+        }
       }, 1000 * 60 * 30);
     }
   });

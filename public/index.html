@@ -55,7 +55,10 @@
             <span>Видеозвонки и конференции</span>
           </div>
         </div>
-        <button id="installBtn" class="btn ghost hidden" type="button">Установить приложение</button>
+        <div class="lobby-header-actions">
+          <button id="adminOpenBtn" class="btn ghost" type="button">Кабинет администратора</button>
+          <button id="installBtn" class="btn ghost hidden" type="button">Установить приложение</button>
+        </div>
       </header>
 
       <div id="secureBanner" class="secure-banner hidden" role="alert">
@@ -127,6 +130,86 @@
           <li>Транскрипция и отчёт</li>
           <li>Права и роли участников</li>
         </ul>
+      </main>
+    </section>
+
+    <!-- Admin login -->
+    <section id="adminLogin" class="view">
+      <div class="lobby-bg"></div>
+      <main class="admin-wrap">
+        <form id="adminLoginForm" class="card admin-card">
+          <h2>Вход администратора</h2>
+          <p class="hint">Без запуска конференции — управление ссылками и настройками.</p>
+          <label>Логин
+            <input id="adminUser" name="username" required autocomplete="username" placeholder="admin" />
+          </label>
+          <label>Пароль
+            <input id="adminPass" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" />
+          </label>
+          <button class="btn primary" type="submit">Войти в кабинет</button>
+          <button id="adminLoginBackBtn" class="btn ghost" type="button">← На главную</button>
+        </form>
+      </main>
+    </section>
+
+    <!-- Admin cabinet -->
+    <section id="adminCabinet" class="view">
+      <div class="lobby-bg"></div>
+      <header class="lobby-header">
+        <div class="brand">
+          <img src="icons/icon.svg" alt="" width="40" height="40" />
+          <div>
+            <strong>Кабинет администратора</strong>
+            <span id="adminUserLabel">admin</span>
+          </div>
+        </div>
+        <div class="lobby-header-actions">
+          <button id="adminRefreshBtn" class="btn ghost" type="button">Обновить</button>
+          <button id="adminLogoutBtn" class="btn ghost" type="button">Выйти</button>
+        </div>
+      </header>
+      <main class="admin-wrap admin-cabinet">
+        <form id="adminCreateForm" class="card">
+          <h2>Создать ссылку конференции</h2>
+          <p class="hint">Ссылка создаётся без входа в звонок. Подключиться можно позже из кабинета.</p>
+          <label>Название
+            <input id="adminRoomName" maxlength="80" placeholder="Планерка / Совещание" />
+          </label>
+          <label>ID ссылки (необязательно)
+            <input id="adminRoomId" maxlength="32" placeholder="автоматически" pattern="[A-Za-z0-9_-]*" />
+          </label>
+          <label>Пароль (необязательно)
+            <input id="adminRoomPassword" type="password" maxlength="64" placeholder="без пароля" />
+          </label>
+          <button class="btn primary" type="submit">Создать ссылку</button>
+        </form>
+
+        <div class="card admin-list-card">
+          <div class="admin-list-head">
+            <h2>Ссылки конференций</h2>
+            <button id="adminCleanupBtn" class="btn secondary" type="button">Удалить неиспользуемые (старше 24ч)</button>
+          </div>
+          <div id="adminConferenceList" class="admin-conference-list">
+            <p class="hint">Загрузка…</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Подключиться к конференции</h2>
+          <p class="hint">Выберите ссылку ниже или введите ID вручную — вход начнёт звонок.</p>
+          <form id="adminJoinForm" class="admin-join-form">
+            <label>Ваше имя
+              <input id="adminJoinName" maxlength="40" required placeholder="Администратор" />
+            </label>
+            <label>ID комнаты
+              <input id="adminJoinRoomId" maxlength="32" required placeholder="id ссылки" />
+            </label>
+            <label>Пароль (если есть)
+              <input id="adminJoinPassword" type="password" maxlength="64" placeholder="необязательно" />
+            </label>
+            <button class="btn primary" type="submit">Войти в конференцию</button>
+          </form>
+        </div>
       </main>
     </section>
 
@@ -247,6 +330,12 @@
         var s2 = document.createElement('script');
         s2.type = 'module';
         s2.src = 'js/app.js';
+        s2.onload = function () {
+          var s3 = document.createElement('script');
+          s3.type = 'module';
+          s3.src = 'js/admin.js';
+          document.body.appendChild(s3);
+        };
         document.body.appendChild(s2);
       };
       s1.onerror = function () {

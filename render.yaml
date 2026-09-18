@@ -16,3 +16,7 @@ services:
         value: "0"
       - key: VIDEOCALL_LOCAL_HTTPS
         value: "0"
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASSWORD
+        value: VideoCall2026

@@ -1125,12 +1125,22 @@ function initPWA() {
   });
 }
 
+window.VideoCallApp = {
+  showView,
+  toast,
+  enterRoom,
+  acquireMediaInGesture,
+  saveLobbyName,
+  loadLobbyName,
+};
+
 function boot() {
   showSecureBannerIfNeeded();
   showPhoneHint();
   initLobby();
   initRoomControls();
   initPWA();
+  window.dispatchEvent(new Event('videocall:ready'));
 
   // iOS: unlock audio on first tap
   const unlock = () => {
