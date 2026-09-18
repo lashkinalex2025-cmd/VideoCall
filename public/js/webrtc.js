@@ -3,13 +3,91 @@ const ICE_SERVERS = {
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
+    // Public TURN — нужен для многих мобильных сетей (NAT)
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
+  iceCandidatePoolSize: 4,
 };
+
+function isMobile() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+}
+
+function preferMobileConstraints(audio = true, video = true) {
+  const mobile = isMobile();
+  return {
+    audio: audio
+      ? {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      : false,
+    video: video
+      ? mobile
+        ? {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 640 },
+            height: { ideal: 360 },
+            frameRate: { ideal: 24, max: 30 },
+          }
+        : {
+            facingMode: 'user',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          }
+      : false,
+  };
+}
+
+export async function getMediaSafe({ audio = true, video = true } = {}) {
+  if (!window.isSecureContext) {
+    const err = new Error('INSECURE_CONTEXT');
+    err.code = 'INSECURE_CONTEXT';
+    throw err;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const err = new Error('MEDIA_UNAVAILABLE');
+    err.code = 'MEDIA_UNAVAILABLE';
+    throw err;
+  }
+
+  const attempts = [
+    preferMobileConstraints(audio, video),
+    { audio: !!audio, video: video ? { facingMode: 'user' } : false },
+    { audio: !!audio, video: !!video },
+    { audio: true, video: false },
+  ];
+
+  let lastError;
+  for (const constraints of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('getUserMedia failed');
+}
 
 export class MeshCall {
   /**
    * @param {object} opts
-   * @param {import('socket.io-client').Socket | any} opts.socket
+   * @param {any} opts.socket
    * @param {string} opts.selfId
    * @param {(peerId: string, stream: MediaStream) => void} opts.onRemoteStream
    * @param {(peerId: string) => void} opts.onPeerLeft
@@ -33,22 +111,7 @@ export class MeshCall {
   }
 
   async initLocal({ audio = true, video = true } = {}) {
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: audio
-        ? {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          }
-        : false,
-      video: video
-        ? {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            facingMode: 'user',
-          }
-        : false,
-    });
+    this.localStream = await getMediaSafe({ audio, video });
     return this.localStream;
   }
 
@@ -59,8 +122,11 @@ export class MeshCall {
       for (const track of this.localStream.getTracks()) {
         pc.addTrack(track, this.localStream);
       }
+    } else {
+      // Ensure transceiver exists so remote media can still arrive
+      pc.addTransceiver('audio', { direction: 'recvonly' });
+      pc.addTransceiver('video', { direction: 'recvonly' });
     }
-    // Initiator creates offer when we are the "impolite" side or always try
     await this.safeOffer(peerId);
   }
 
@@ -78,13 +144,17 @@ export class MeshCall {
     };
 
     pc.ontrack = (event) => {
-      const [stream] = event.streams;
-      if (stream) this.onRemoteStream(peerId, stream);
+      let stream = event.streams && event.streams[0];
+      if (!stream) {
+        stream = new MediaStream([event.track]);
+      }
+      this.onRemoteStream(peerId, stream);
     };
 
     pc.onconnectionstatechange = () => {
-      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-        // keep for a bit; cleanup happens on participant:left
+      if (pc.connectionState === 'failed') {
+        pc.restartIce?.();
+        this.safeOffer(peerId).catch(() => {});
       }
     };
 
@@ -104,7 +174,14 @@ export class MeshCall {
     if (!pc) return;
     try {
       this.makingOffer.add(peerId);
-      await pc.setLocalDescription(await pc.createOffer());
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
+      if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-local-offer') {
+        return;
+      }
+      await pc.setLocalDescription(offer);
       this.socket.emit('signal', {
         to: peerId,
         data: { type: 'sdp', sdp: pc.localDescription },
@@ -160,6 +237,7 @@ export class MeshCall {
     for (const pc of this.pcs.values()) {
       const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
       if (sender) await sender.replaceTrack(track);
+      else if (track) pc.addTrack(track, this.localStream || new MediaStream([track]));
     }
   }
 
@@ -177,8 +255,11 @@ export class MeshCall {
   }
 
   async startScreenShare() {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error('Демонстрация экрана не поддерживается на этом устройстве');
+    }
     const screen = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 15 },
+      video: true,
       audio: false,
     });
     this.screenStream = screen;

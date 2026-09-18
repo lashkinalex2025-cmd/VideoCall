@@ -31,6 +31,21 @@
         <button id="installBtn" class="btn ghost hidden" type="button">Установить приложение</button>
       </header>
 
+      <div id="secureBanner" class="secure-banner hidden" role="alert">
+        <strong>Телефон: нужен HTTPS</strong>
+        <p>
+          Safari и Chrome на iPhone/Android блокируют камеру и микрофон на обычном HTTP.
+          Запустите сервер командой <code>npm start</code> и откройте на телефоне
+          ссылку <b>Интернет</b> (туннель) или <b>LAN HTTPS</b> из окна сервера — не http://192.168…
+        </p>
+      </div>
+
+      <div id="phoneHint" class="phone-hint hidden">
+        <strong>Открыть на телефоне (та же Wi‑Fi)</strong>
+        <p id="phoneHintLinks">Загрузка ссылок…</p>
+        <p class="phone-hint-note">Если Safari/Chrome покажет предупреждение о сертификате — нажмите «Дополнительно» → «Перейти на сайт».</p>
+      </div>
+
       <main class="lobby-main">
         <div class="hero">
           <h1>Встречи без лимита по времени</h1>

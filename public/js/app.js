@@ -1,7 +1,45 @@
-import { MeshCall } from './webrtc.js';
+import { MeshCall, getMediaSafe } from './webrtc.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+function isSecureEnough() {
+  return window.isSecureContext === true;
+}
+
+function showSecureBannerIfNeeded() {
+  const banner = $('#secureBanner');
+  if (!banner) return;
+  const insecure = !isSecureEnough();
+  banner.classList.toggle('hidden', !insecure);
+  if (insecure) {
+    console.warn('Insecure context: camera/mic blocked on mobile browsers');
+  }
+}
+
+async function showPhoneHint() {
+  const box = $('#phoneHint');
+  const links = $('#phoneHintLinks');
+  if (!box || !links) return;
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+  if (mobile) {
+    box.classList.add('hidden');
+    return;
+  }
+  try {
+    const info = await fetch('/api/info').then((r) => r.json());
+    if (!info?.lanHttps?.length) {
+      box.classList.add('hidden');
+      return;
+    }
+    links.innerHTML = info.lanHttps
+      .map((url) => `<div><a href="${url}" target="_blank" rel="noopener">${url}</a></div>`)
+      .join('');
+    box.classList.remove('hidden');
+  } catch (_) {
+    box.classList.add('hidden');
+  }
+}
 
 const state = {
   socket: null,
@@ -106,21 +144,41 @@ function initLobby() {
 }
 
 async function enterRoom({ roomId, name, password }) {
-  try {
-    toast('Подключение…');
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-    });
-    stream.getTracks().forEach((t) => t.stop());
-  } catch (err) {
-    console.warn(err);
-    toast('Нужен доступ к камере/микрофону (можно продолжить и включить позже)');
+  if (!isSecureEnough()) {
+    showSecureBannerIfNeeded();
+    toast('Откройте приложение по HTTPS (см. баннер сверху)');
+    return;
   }
 
+  toast('Подключение…');
+
   if (!state.socket) {
-    state.socket = io({ transports: ['websocket', 'polling'] });
+    state.socket = io({
+      transports: ['websocket', 'polling'],
+      upgrade: true,
+      rememberUpgrade: true,
+    });
     wireSocket();
+  }
+
+  if (!state.socket.connected) {
+    try {
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('Нет связи с сервером')), 8000);
+        state.socket.once('connect', () => {
+          clearTimeout(t);
+          resolve();
+        });
+        state.socket.once('connect_error', (err) => {
+          clearTimeout(t);
+          reject(err);
+        });
+        if (state.socket.disconnected) state.socket.connect();
+      });
+    } catch (err) {
+      toast(err.message || 'Сервер недоступен');
+      return;
+    }
   }
 
   state.socket.emit('room:join', { roomId, name, password }, async (res) => {
@@ -168,18 +226,28 @@ async function enterRoom({ roomId, name, password }) {
 
       try {
         await state.call.initLocal({ audio: true, video: true });
+        state.audioEnabled = true;
+        state.videoEnabled = true;
       } catch (err) {
         console.warn('media init failed', err);
-        toast('Камера/микрофон недоступны — войдите без медиа или разрешите доступ');
         state.audioEnabled = false;
         state.videoEnabled = false;
-        try {
-          state.call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-          state.audioEnabled = true;
-        } catch (_) {
-          state.call.localStream = new MediaStream();
+        if (err?.code === 'INSECURE_CONTEXT') {
+          toast('Нужен HTTPS для камеры на телефоне');
+        } else {
+          try {
+            state.call.localStream = await getMediaSafe({ audio: true, video: false });
+            state.audioEnabled = true;
+            toast('Камера недоступна — только микрофон');
+          } catch (_) {
+            state.call.localStream = new MediaStream();
+            toast('Без камеры/микрофона — можно пользоваться чатом');
+          }
         }
       }
+
+      $('#micBtn').classList.toggle('off', !state.audioEnabled);
+      $('#camBtn').classList.toggle('off', !state.videoEnabled);
 
       renderVideos();
       for (const peer of state.peers.values()) {
@@ -347,9 +415,18 @@ function renderVideos() {
 
     const video = document.createElement('video');
     video.autoplay = true;
+    video.muted = Boolean(e.self);
     video.playsInline = true;
-    video.muted = e.self;
-    if (e.stream) video.srcObject = e.stream;
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.setAttribute('autoplay', 'true');
+    if (e.self) video.setAttribute('muted', 'true');
+    if (e.stream) {
+      video.srcObject = e.stream;
+      const play = () => video.play().catch(() => {});
+      play();
+      video.addEventListener('loadedmetadata', play, { once: true });
+    }
 
     const meta = document.createElement('div');
     meta.className = 'tile-meta';
@@ -517,6 +594,10 @@ function initRoomControls() {
     renderVideos();
   });
 
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    $('#screenBtn').classList.add('hidden');
+  }
+
   $('#screenBtn').addEventListener('click', async () => {
     try {
       if (state.screenSharing) {
@@ -530,6 +611,9 @@ function initRoomControls() {
       if (!state.room?.permissions?.allowScreenShare && !canModerate()) {
         return toast('Демонстрация экрана запрещена');
       }
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        return toast('На iPhone/iPad демонстрация экрана в браузере недоступна');
+      }
       await state.call.startScreenShare();
       state.screenSharing = true;
       $('#screenBtn').classList.add('active');
@@ -538,7 +622,7 @@ function initRoomControls() {
       toast('Демонстрация экрана начата');
     } catch (err) {
       console.error(err);
-      toast('Не удалось начать демонстрацию экрана');
+      toast(err.message || 'Не удалось начать демонстрацию экрана');
     }
   });
 
@@ -868,9 +952,28 @@ function initPWA() {
 }
 
 function boot() {
+  showSecureBannerIfNeeded();
+  showPhoneHint();
   initLobby();
   initRoomControls();
   initPWA();
+
+  // iOS: unlock audio on first tap
+  const unlock = () => {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const ctx = new AC();
+      if (ctx.state === 'suspended') ctx.resume();
+      setTimeout(() => ctx.close().catch(() => {}), 500);
+    } catch (_) {
+      /* ignore */
+    }
+    document.removeEventListener('touchend', unlock);
+    document.removeEventListener('click', unlock);
+  };
+  document.addEventListener('touchend', unlock, { once: true, passive: true });
+  document.addEventListener('click', unlock, { once: true });
 }
 
 boot();

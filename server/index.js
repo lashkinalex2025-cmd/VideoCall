@@ -1,25 +1,39 @@
 const path = require('path');
 const http = require('http');
+const https = require('https');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
+const { ensureCerts, listLocalIPs } = require('./https');
 
 const PORT = Number(process.env.PORT) || 3000;
+const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_PARTICIPANTS = 100;
+const ENABLE_TUNNEL = process.env.VIDEOCALL_TUNNEL !== '0';
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
-  maxHttpBufferSize: 5e6,
-});
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use((req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), display-capture=(self)');
+  next();
+});
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    }
+  },
+}));
+
+const io = new Server({
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  maxHttpBufferSize: 5e6,
+});
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
@@ -121,6 +135,17 @@ function isHost(participant) {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'VideoCall', rooms: rooms.size });
+});
+
+app.get('/api/info', (_req, res) => {
+  const ips = listLocalIPs().filter((ip) => ip !== '127.0.0.1');
+  res.json({
+    ok: true,
+    httpPort: PORT,
+    httpsPort: HTTPS_PORT,
+    lanHttps: ips.map((ip) => `https://${ip}:${HTTPS_PORT}`),
+    tip: 'На iPhone/Android открывайте HTTPS-ссылку, не HTTP.',
+  });
 });
 
 app.get('/api/rooms/:id', (req, res) => {
@@ -537,6 +562,109 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`VideoCall running at http://localhost:${PORT}`);
+function printBanner(tunnelUrl) {
+  const ips = listLocalIPs().filter((ip) => ip !== '127.0.0.1');
+  console.log('');
+  console.log('========== VideoCall ==========');
+  console.log(`ПК (HTTP):   http://localhost:${PORT}`);
+  console.log(`ПК (HTTPS):  https://localhost:${HTTPS_PORT}`);
+  for (const ip of ips) {
+    console.log(`LAN HTTPS:   https://${ip}:${HTTPS_PORT}   ← для телефона в той же Wi‑Fi`);
+  }
+  if (tunnelUrl) {
+    console.log(`Интернет:    ${tunnelUrl}   ← удобно для iPhone/Android (нормальный HTTPS)`);
+  }
+  console.log('');
+  console.log('На телефоне камера/микрофон работают ТОЛЬКО по HTTPS.');
+  console.log('Если браузер пишет «небезопасно» на LAN HTTPS — лучше откройте ссылку «Интернет».');
+  console.log('================================');
+}
+
+async function startTunnel(port) {
+  if (!ENABLE_TUNNEL) return null;
+
+  // 1) localtunnel
+  try {
+    const localtunnel = require('localtunnel');
+    const tunnelPromise = localtunnel({ port, local_host: '127.0.0.1' });
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('localtunnel timeout')), 10000)
+    );
+    const tunnel = await Promise.race([tunnelPromise, timeoutPromise]);
+    tunnel.on('error', (err) => console.warn('Tunnel error:', err.message));
+    tunnel.on('close', () => console.warn('Tunnel closed'));
+    if (tunnel?.url) return tunnel.url;
+  } catch (err) {
+    console.warn('localtunnel:', err.message);
+  }
+
+  // 2) cloudflared quick tunnel (if installed)
+  try {
+    const { spawn } = require('child_process');
+    const url = await new Promise((resolve, reject) => {
+      const child = spawn('cloudflared', ['tunnel', '--url', `http://127.0.0.1:${port}`], {
+        windowsHide: true,
+      });
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error('cloudflared timeout'));
+        }
+      }, 15000);
+      const onData = (buf) => {
+        const text = buf.toString();
+        const match = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        if (match && !settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(match[0]);
+        }
+      };
+      child.stdout.on('data', onData);
+      child.stderr.on('data', onData);
+      child.on('error', (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+      child.on('exit', (code) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error('cloudflared exited ' + code));
+        }
+      });
+    });
+    return url;
+  } catch (err) {
+    console.warn('cloudflared:', err.message);
+  }
+
+  console.warn('HTTPS-туннель недоступен. Используйте LAN HTTPS на телефоне в той же Wi‑Fi.');
+  return null;
+}
+
+async function main() {
+  const certs = await ensureCerts();
+  const httpServer = http.createServer(app);
+  const httpsServer = https.createServer({ key: certs.key, cert: certs.cert }, app);
+  io.attach(httpServer);
+  io.attach(httpsServer);
+
+  await new Promise((resolve) => httpServer.listen(PORT, HOST, resolve));
+  await new Promise((resolve) => httpsServer.listen(HTTPS_PORT, HOST, resolve));
+  printBanner(null);
+  const tunnelUrl = await startTunnel(PORT);
+  if (tunnelUrl) {
+    console.log(`Интернет:    ${tunnelUrl}   ← откройте ЭТУ ссылку на iPhone/Android`);
+    console.log('================================');
+  }
+}
+
+main().catch((err) => {
+  console.error('Failed to start VideoCall:', err);
+  process.exit(1);
 });
