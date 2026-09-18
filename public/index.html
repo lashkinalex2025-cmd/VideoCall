@@ -85,9 +85,56 @@
           </p>
         </div>
 
-        <div class="lobby-cards">
-          <form id="createForm" class="card">
-            <h2>Создать комнату</h2>
+        <div class="lobby-cards lobby-cards-3">
+          <form id="registerForm" class="card">
+            <h2>Регистрация</h2>
+            <p class="hint">После регистрации откроется личный кабинет.</p>
+            <label>Электронная почта
+              <input id="registerEmail" type="email" required placeholder="you@email.com" autocomplete="email" />
+            </label>
+            <label>Имя (необязательно)
+              <input id="registerName" maxlength="60" placeholder="Иван" autocomplete="name" />
+            </label>
+            <label>Пароль
+              <input id="registerPassword" type="password" required minlength="6" placeholder="минимум 6 символов" autocomplete="new-password" />
+            </label>
+            <label>Подтверждение пароля
+              <input id="registerPasswordConfirm" type="password" required minlength="6" placeholder="повторите пароль" autocomplete="new-password" />
+            </label>
+            <button class="btn primary" type="submit">Зарегистрироваться</button>
+          </form>
+
+          <form id="userLoginForm" class="card">
+            <h2>Вход в кабинет</h2>
+            <p class="hint">Для зарегистрированных пользователей и администраторов.</p>
+            <label>Email или логин
+              <input id="userLoginEmail" required placeholder="you@email.com или admin" autocomplete="username" />
+            </label>
+            <label>Пароль
+              <input id="userLoginPassword" type="password" required placeholder="••••••••" autocomplete="current-password" />
+            </label>
+            <button class="btn secondary" type="submit">Войти</button>
+          </form>
+
+          <form id="joinForm" class="card">
+            <h2>Гостевой вход в конференцию</h2>
+            <p class="hint">Без личного кабинета — по ID и паролю конференции.</p>
+            <label>Ваше имя
+              <input id="joinName" name="name" maxlength="40" required placeholder="Мария" autocomplete="name" />
+            </label>
+            <label>ID комнаты
+              <input id="joinRoomId" name="roomId" maxlength="32" required placeholder="например abc12def" />
+            </label>
+            <label>Пароль (если есть)
+              <input id="joinPassword" type="password" maxlength="64" placeholder="необязательно" autocomplete="current-password" />
+            </label>
+            <button class="btn primary" type="submit">Присоединиться</button>
+          </form>
+        </div>
+
+        <details class="card guest-create-card">
+          <summary>Быстро создать комнату и сразу войти (гость)</summary>
+          <form id="createForm" class="guest-create-form">
             <label>Ваше имя
               <input id="createName" name="name" maxlength="40" required placeholder="Иван" autocomplete="name" />
             </label>
@@ -104,23 +151,9 @@
             <label id="createPasswordWrap" class="hidden">Пароль
               <input id="createPassword" type="password" maxlength="64" placeholder="Пароль комнаты" autocomplete="new-password" />
             </label>
-            <button class="btn primary" type="submit">Создать и войти</button>
+            <button class="btn secondary" type="submit">Создать и войти</button>
           </form>
-
-          <form id="joinForm" class="card">
-            <h2>Войти в комнату</h2>
-            <label>Ваше имя
-              <input id="joinName" name="name" maxlength="40" required placeholder="Мария" autocomplete="name" />
-            </label>
-            <label>ID комнаты
-              <input id="joinRoomId" name="roomId" maxlength="32" required placeholder="например abc12def" />
-            </label>
-            <label>Пароль (если есть)
-              <input id="joinPassword" type="password" maxlength="64" placeholder="необязательно" autocomplete="current-password" />
-            </label>
-            <button class="btn secondary" type="submit">Присоединиться</button>
-          </form>
-        </div>
+        </details>
 
         <ul class="features">
           <li>Web / PWA / установка на Android</li>
@@ -130,6 +163,52 @@
           <li>Транскрипция и отчёт</li>
           <li>Права и роли участников</li>
         </ul>
+      </main>
+    </section>
+
+    <!-- User cabinet -->
+    <section id="userCabinet" class="view">
+      <div class="lobby-bg"></div>
+      <header class="lobby-header">
+        <div class="brand">
+          <img src="icons/icon.svg" alt="" width="40" height="40" />
+          <div>
+            <strong>Личный кабинет</strong>
+            <span id="userCabinetLabel">пользователь</span>
+          </div>
+        </div>
+        <div class="lobby-header-actions">
+          <button id="userRefreshBtn" class="btn ghost" type="button">Обновить</button>
+          <button id="userLogoutBtn" class="btn ghost" type="button">Выйти</button>
+          <button id="userHomeBtn" class="btn ghost" type="button">На главную</button>
+        </div>
+      </header>
+      <main class="admin-wrap admin-cabinet">
+        <form id="userCreateForm" class="card">
+          <h2>Создать и настроить конференцию</h2>
+          <label>Название
+            <input id="userRoomName" maxlength="80" placeholder="Планерка / Совещание" />
+          </label>
+          <label>ID ссылки (необязательно)
+            <input id="userRoomId" maxlength="32" placeholder="автоматически" pattern="[A-Za-z0-9_-]*" />
+          </label>
+          <label>Пароль (необязательно)
+            <input id="userRoomPassword" type="password" maxlength="64" placeholder="без пароля" />
+          </label>
+          <div class="user-create-actions">
+            <button class="btn secondary" type="submit" data-mode="save">Создать ссылку</button>
+            <button class="btn primary" type="button" id="userCreateAndStartBtn">Создать и начать</button>
+          </div>
+        </form>
+
+        <div class="card admin-list-card">
+          <div class="admin-list-head">
+            <h2>Мои конференции</h2>
+          </div>
+          <div id="userConferenceList" class="admin-conference-list">
+            <p class="hint">Загрузка…</p>
+          </div>
+        </div>
       </main>
     </section>
 
@@ -209,6 +288,45 @@
             </label>
             <button class="btn primary" type="submit">Войти в конференцию</button>
           </form>
+        </div>
+
+        <div class="card">
+          <div class="admin-list-head">
+            <h2>Пользователи</h2>
+            <button id="adminUsersRefreshBtn" class="btn ghost" type="button">Обновить</button>
+          </div>
+          <div id="adminUsersList" class="admin-conference-list">
+            <p class="hint">Загрузка…</p>
+          </div>
+          <form id="adminCreateUserForm" class="admin-join-form" style="margin-top:1rem">
+            <h3>Добавить пользователя / администратора</h3>
+            <label>Email
+              <input id="adminNewUserEmail" type="email" required placeholder="user@email.com" />
+            </label>
+            <label>Имя
+              <input id="adminNewUserName" maxlength="60" placeholder="Имя" />
+            </label>
+            <label>Пароль
+              <input id="adminNewUserPassword" type="password" required minlength="6" placeholder="минимум 6 символов" />
+            </label>
+            <label>Роль
+              <select id="adminNewUserRole">
+                <option value="user">Обычный пользователь</option>
+                <option value="admin">Администратор (права как у главного)</option>
+              </select>
+            </label>
+            <button class="btn secondary" type="submit">Создать учётную запись</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="admin-list-head">
+            <h2>Сейчас online в конференциях</h2>
+            <button id="adminOnlineRefreshBtn" class="btn ghost" type="button">Обновить</button>
+          </div>
+          <div id="adminOnlineList" class="admin-conference-list">
+            <p class="hint">Загрузка…</p>
+          </div>
         </div>
       </main>
     </section>
@@ -335,6 +453,10 @@
           s3.type = 'module';
           s3.src = 'js/admin.js';
           document.body.appendChild(s3);
+          var s4 = document.createElement('script');
+          s4.type = 'module';
+          s4.src = 'js/cabinet.js';
+          document.body.appendChild(s4);
         };
         document.body.appendChild(s2);
       };

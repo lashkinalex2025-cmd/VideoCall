@@ -5,6 +5,11 @@ const adminState = {
   username: localStorage.getItem('vc_admin_user') || '',
 };
 
+function refreshAdminSessionFromStorage() {
+  adminState.token = localStorage.getItem('vc_admin_token') || '';
+  adminState.username = localStorage.getItem('vc_admin_user') || '';
+}
+
 function api(path, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
@@ -108,11 +113,83 @@ function setSession(token, username) {
   localStorage.setItem('vc_admin_user', username);
 }
 
+async function renderUsersList() {
+  const box = $('#adminUsersList');
+  if (!box) return;
+  box.innerHTML = '<p class="hint">Загрузка…</p>';
+  try {
+    const data = await api('/api/admin/users');
+    const list = data.users || [];
+    if (!list.length) {
+      box.innerHTML = '<p class="hint">Пользователей пока нет.</p>';
+      return;
+    }
+    box.innerHTML = list
+      .map((u) => {
+        const roleLabel =
+          u.role === 'superadmin' ? 'главный admin' : u.role === 'admin' ? 'администратор' : 'пользователь';
+        return `
+          <article class="admin-conf-item" data-user-id="${u.id}">
+            <div class="admin-conf-main">
+              <div class="admin-conf-title">
+                <strong>${escapeHtml(u.email)}</strong>
+                <span class="admin-badge">${escapeHtml(roleLabel)}</span>
+              </div>
+              <div class="admin-conf-meta">
+                Имя: ${escapeHtml(u.name || '—')}<br/>
+                Создан: ${formatDate(u.createdAt)} · Вход: ${formatDate(u.lastLoginAt)}
+              </div>
+            </div>
+            <div class="admin-conf-actions">
+              <button type="button" class="btn ghost danger-text" data-action="delete-user">Удалить</button>
+            </div>
+          </article>`;
+      })
+      .join('');
+  } catch (err) {
+    box.innerHTML = `<p class="hint">Ошибка: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function renderOnlineList() {
+  const box = $('#adminOnlineList');
+  if (!box) return;
+  box.innerHTML = '<p class="hint">Загрузка…</p>';
+  try {
+    const data = await api('/api/admin/online');
+    const list = data.online || [];
+    if (!list.length) {
+      box.innerHTML = '<p class="hint">Сейчас никто не в конференции.</p>';
+      return;
+    }
+    box.innerHTML = list
+      .map(
+        (o) => `
+        <article class="admin-conf-item">
+          <div class="admin-conf-main">
+            <div class="admin-conf-title">
+              <strong>${escapeHtml(o.name)}</strong>
+              <span class="admin-badge live">online</span>
+            </div>
+            <div class="admin-conf-meta">
+              Комната: <code>${escapeHtml(o.roomId)}</code> (${escapeHtml(o.roomName || '')}) · роль: ${escapeHtml(o.role)}<br/>
+              Вошёл: ${formatDate(o.joinedAt)}
+            </div>
+          </div>
+        </article>`
+      )
+      .join('');
+  } catch (err) {
+    box.innerHTML = `<p class="hint">Ошибка: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
 async function openCabinet() {
+  refreshAdminSessionFromStorage();
   const app = await waitApp();
   $('#adminUserLabel').textContent = adminState.username || 'admin';
   app.showView('adminCabinet');
-  await renderConferenceList();
+  await Promise.all([renderConferenceList(), renderUsersList(), renderOnlineList()]);
 }
 
 function initAdmin() {
@@ -270,6 +347,51 @@ function initAdmin() {
     app.saveLobbyName(name);
     const localStream = await app.acquireMediaInGesture();
     await app.enterRoom({ roomId, name, password, localStream });
+  });
+
+  $('#adminUsersRefreshBtn')?.addEventListener('click', () => renderUsersList());
+  $('#adminOnlineRefreshBtn')?.addEventListener('click', () => renderOnlineList());
+  window.addEventListener('videocall:admin-refresh', () => {
+    if (adminState.token) openCabinet();
+  });
+
+  $('#adminUsersList')?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action="delete-user"]');
+    const item = e.target.closest('[data-user-id]');
+    if (!btn || !item) return;
+    const id = item.dataset.userId;
+    const app = await waitApp();
+    if (!confirm('Удалить этого пользователя из приложения?')) return;
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      app.toast('Пользователь удалён');
+      await renderUsersList();
+    } catch (err) {
+      app.toast(err.message || 'Ошибка удаления');
+    }
+  });
+
+  $('#adminCreateUserForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const app = await waitApp();
+    try {
+      const result = await api('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: $('#adminNewUserEmail').value.trim(),
+          name: $('#adminNewUserName').value.trim(),
+          password: $('#adminNewUserPassword').value,
+          role: $('#adminNewUserRole').value,
+        }),
+      });
+      $('#adminNewUserEmail').value = '';
+      $('#adminNewUserName').value = '';
+      $('#adminNewUserPassword').value = '';
+      app.toast(`Создан: ${result.user.email} (${result.user.role})`);
+      await renderUsersList();
+    } catch (err) {
+      app.toast(err.message || 'Ошибка создания');
+    }
   });
 }
 

@@ -9,7 +9,9 @@ const { v4: uuidv4 } = require('uuid');
 const { ensureCerts, listLocalIPs } = require('./https');
 const { getIceServers } = require('./ice');
 const store = require('./store');
-const admin = require('./admin');
+const users = require('./users');
+const auth = require('./auth');
+const mail = require('./mail');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
@@ -101,7 +103,7 @@ function defaultPermissions() {
   };
 }
 
-function persistRoom(room, createdBy = 'system') {
+function persistRoom(room, createdBy = 'system', ownerId = null) {
   const existing = store.getConference(room.id);
   store.upsertConference({
     id: room.id,
@@ -112,6 +114,7 @@ function persistRoom(room, createdBy = 'system') {
     updatedAt: Date.now(),
     lastActivityAt: Date.now(),
     createdBy: existing?.createdBy || createdBy,
+    ownerId: ownerId || existing?.ownerId || null,
   });
 }
 
@@ -143,6 +146,14 @@ function ensureRuntimeRoom(roomId) {
 function conferenceListItem(conf) {
   const live = rooms.get(conf.id);
   const participantCount = live ? live.participants.size : 0;
+  const onlineParticipants = live
+    ? [...live.participants.values()].map((p) => ({
+        id: p.id,
+        name: p.name,
+        role: p.role,
+        joinedAt: p.joinedAt,
+      }))
+    : [];
   return {
     id: conf.id,
     name: conf.name,
@@ -152,11 +163,34 @@ function conferenceListItem(conf) {
     updatedAt: conf.updatedAt,
     lastActivityAt: conf.lastActivityAt,
     createdBy: conf.createdBy || 'system',
+    ownerId: conf.ownerId || null,
     participantCount,
+    onlineParticipants,
     active: participantCount > 0,
     link: `/?room=${encodeURIComponent(conf.id)}`,
   };
 }
+
+function getOnlineSnapshot() {
+  const result = [];
+  for (const room of rooms.values()) {
+    if (!room.participants.size) continue;
+    for (const p of room.participants.values()) {
+      result.push({
+        roomId: room.id,
+        roomName: room.name,
+        participantId: p.id,
+        name: p.name,
+        role: p.role,
+        joinedAt: p.joinedAt,
+      });
+    }
+  }
+  return result;
+}
+
+// bootstrap admin user on startup
+users.ensureBootstrapAdmin().catch((err) => console.error('bootstrap admin', err));
 
 function publicParticipant(p) {
   return {
@@ -271,31 +305,166 @@ app.post('/api/rooms', async (req, res) => {
   }
 });
 
-// ---------- Admin API ----------
-app.get('/api/admin/info', (_req, res) => {
-  res.json(admin.getAdminInfo());
+// ---------- Auth / Registration ----------
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim();
+    const password = String(req.body?.password || '');
+    const passwordConfirm = String(req.body?.passwordConfirm || '');
+    const name = String(req.body?.name || '').trim();
+    if (password !== passwordConfirm) {
+      return res.status(400).json({ error: 'Пароли не совпадают' });
+    }
+    const result = await users.register({ email, password, name });
+    if (!result.ok) return res.status(400).json(result);
+    mail.sendNewUserNotification(result.user).catch(() => {});
+    const session = auth.issueToken(result.user);
+    res.json({ ...session, mailNotifyTo: mail.NOTIFY_EMAIL });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось зарегистрироваться' });
+  }
 });
 
-app.post('/api/admin/login', (req, res) => {
-  const username = String(req.body?.username || '').trim();
+app.post('/api/auth/login', async (req, res) => {
+  const login = String(req.body?.email || req.body?.username || '').trim();
   const password = String(req.body?.password || '');
-  const result = admin.login(username, password);
+  const result = await auth.login(login, password);
   if (!result.ok) return res.status(401).json(result);
   res.json(result);
 });
 
-app.post('/api/admin/logout', admin.authMiddleware, (req, res) => {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : req.headers['x-admin-token'];
-  res.json(admin.logout(token));
+app.post('/api/auth/logout', auth.authRequired, (req, res) => {
+  res.json(auth.logout(auth.getBearer(req)));
 });
 
-app.get('/api/admin/conferences', admin.authMiddleware, (_req, res) => {
+app.get('/api/auth/me', auth.authRequired, (req, res) => {
+  const user = users.findById(req.auth.userId);
+  res.json({ user: users.publicUser(user) });
+});
+
+// ---------- User cabinet API ----------
+app.get('/api/user/conferences', auth.authRequired, (req, res) => {
+  const list = store
+    .listConferences()
+    .filter((c) => c.ownerId === req.auth.userId || c.createdBy === req.auth.email)
+    .map(conferenceListItem);
+  res.json({ conferences: list, total: list.length });
+});
+
+app.post('/api/user/conferences', auth.authRequired, async (req, res) => {
+  try {
+    const name = String(req.body?.name || 'Конференция').trim().slice(0, 80);
+    const password = req.body?.password ? String(req.body.password) : '';
+    const roomId = (req.body?.roomId ? String(req.body.roomId) : uuidv4().slice(0, 8))
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 32) || uuidv4().slice(0, 8);
+    if (rooms.has(roomId) || store.getConference(roomId)) {
+      return res.status(409).json({ error: 'Ссылка с таким ID уже существует' });
+    }
+    const passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    const room = createRuntimeRoom({
+      id: roomId,
+      name,
+      passwordHash,
+      permissions: defaultPermissions(),
+      createdAt: Date.now(),
+    });
+    persistRoom(room, req.auth.email, req.auth.userId);
+    res.json(conferenceListItem(store.getConference(roomId)));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось создать конференцию' });
+  }
+});
+
+app.patch('/api/user/conferences/:id', auth.authRequired, async (req, res) => {
+  try {
+    const conf = store.getConference(req.params.id);
+    if (!conf) return res.status(404).json({ error: 'Конференция не найдена' });
+    if (conf.ownerId !== req.auth.userId && !users.isAdminRole(req.auth.role)) {
+      return res.status(403).json({ error: 'Нет доступа к этой конференции' });
+    }
+    if (typeof req.body?.name === 'string' && req.body.name.trim()) {
+      conf.name = req.body.name.trim().slice(0, 80);
+    }
+    if (req.body?.password !== undefined) {
+      const password = String(req.body.password || '');
+      conf.passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    }
+    if (req.body?.permissions && typeof req.body.permissions === 'object') {
+      conf.permissions = { ...defaultPermissions(), ...conf.permissions, ...req.body.permissions };
+    }
+    conf.updatedAt = Date.now();
+    store.upsertConference(conf);
+    const live = rooms.get(conf.id);
+    if (live) {
+      live.name = conf.name;
+      live.passwordHash = conf.passwordHash;
+      live.permissions = { ...conf.permissions };
+      io.to(live.id).emit('room:permissions', live.permissions);
+      io.to(live.id).emit('room:meta', { hasPassword: Boolean(live.passwordHash), name: live.name });
+    }
+    res.json(conferenceListItem(conf));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось обновить конференцию' });
+  }
+});
+
+app.delete('/api/user/conferences/:id', auth.authRequired, (req, res) => {
+  const conf = store.getConference(req.params.id);
+  if (!conf) return res.status(404).json({ error: 'Конференция не найдена' });
+  if (conf.ownerId !== req.auth.userId && !users.isAdminRole(req.auth.role)) {
+    return res.status(403).json({ error: 'Нет доступа' });
+  }
+  const live = rooms.get(conf.id);
+  if (live) {
+    for (const p of live.participants.values()) {
+      io.to(p.socketId).emit('moderation:kicked', { reason: 'Конференция удалена владельцем' });
+    }
+    rooms.delete(conf.id);
+  }
+  store.deleteConference(conf.id);
+  res.json({ ok: true, id: conf.id });
+});
+
+// ---------- Admin API ----------
+app.get('/api/admin/info', (_req, res) => {
+  res.json({
+    username: process.env.ADMIN_USER || 'admin',
+    notifyEmail: mail.NOTIFY_EMAIL,
+    defaultHint: !process.env.ADMIN_PASSWORD,
+  });
+});
+
+app.post('/api/admin/login', async (req, res) => {
+  const username = String(req.body?.username || req.body?.email || '').trim();
+  const password = String(req.body?.password || '');
+  const result = await auth.login(username, password);
+  if (!result.ok) return res.status(401).json(result);
+  if (!users.isAdminRole(result.user.role)) {
+    return res.status(403).json({ error: 'Нет прав администратора' });
+  }
+  res.json({
+    ok: true,
+    token: result.token,
+    username: result.user.email || result.user.name,
+    user: result.user,
+    expiresAt: result.expiresAt,
+  });
+});
+
+app.post('/api/admin/logout', auth.adminRequired, (req, res) => {
+  res.json(auth.logout(auth.getBearer(req)));
+});
+
+app.get('/api/admin/conferences', auth.adminRequired, (_req, res) => {
   const list = store.listConferences().map(conferenceListItem);
   res.json({ conferences: list, total: list.length });
 });
 
-app.post('/api/admin/conferences', admin.authMiddleware, async (req, res) => {
+app.post('/api/admin/conferences', auth.adminRequired, async (req, res) => {
   try {
     const name = String(req.body?.name || 'Конференция').trim().slice(0, 80);
     const password = req.body?.password ? String(req.body.password) : '';
@@ -315,7 +484,7 @@ app.post('/api/admin/conferences', admin.authMiddleware, async (req, res) => {
       permissions: defaultPermissions(),
       createdAt: Date.now(),
     });
-    persistRoom(room, req.admin.username);
+    persistRoom(room, req.auth.email || req.admin.email, req.auth.userId);
     res.json(conferenceListItem(store.getConference(roomId)));
   } catch (err) {
     console.error(err);
@@ -323,7 +492,7 @@ app.post('/api/admin/conferences', admin.authMiddleware, async (req, res) => {
   }
 });
 
-app.patch('/api/admin/conferences/:id', admin.authMiddleware, async (req, res) => {
+app.patch('/api/admin/conferences/:id', auth.adminRequired, async (req, res) => {
   try {
     const conf = store.getConference(req.params.id);
     if (!conf) return res.status(404).json({ error: 'Ссылка не найдена' });
@@ -357,7 +526,7 @@ app.patch('/api/admin/conferences/:id', admin.authMiddleware, async (req, res) =
   }
 });
 
-app.delete('/api/admin/conferences/:id', admin.authMiddleware, (req, res) => {
+app.delete('/api/admin/conferences/:id', auth.adminRequired, (req, res) => {
   const id = req.params.id;
   const live = rooms.get(id);
   if (live) {
@@ -377,7 +546,7 @@ app.delete('/api/admin/conferences/:id', admin.authMiddleware, (req, res) => {
   res.json({ ok: true, id });
 });
 
-app.post('/api/admin/conferences/cleanup', admin.authMiddleware, (req, res) => {
+app.post('/api/admin/conferences/cleanup', auth.adminRequired, (req, res) => {
   const maxAgeHours = Number(req.body?.maxAgeHours);
   const maxAgeMs = Number.isFinite(maxAgeHours) && maxAgeHours > 0
     ? maxAgeHours * 60 * 60 * 1000
@@ -388,7 +557,6 @@ app.post('/api/admin/conferences/cleanup', admin.authMiddleware, (req, res) => {
   );
   const result = store.cleanupUnused({ maxAgeMs, activeIds });
 
-  // Also drop idle runtime rooms that were removed from store
   for (const id of result.removed) {
     rooms.delete(id);
   }
@@ -400,6 +568,53 @@ app.post('/api/admin/conferences/cleanup', admin.authMiddleware, (req, res) => {
     remaining: result.kept,
     maxAgeHours: maxAgeMs / (60 * 60 * 1000),
   });
+});
+
+app.get('/api/admin/users', auth.adminRequired, (_req, res) => {
+  res.json({ users: users.listUsers() });
+});
+
+app.post('/api/admin/users', auth.adminRequired, async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim();
+    const password = String(req.body?.password || '');
+    const name = String(req.body?.name || '').trim();
+    let role = String(req.body?.role || 'user');
+    if (role === 'superadmin' && req.auth.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Только главный администратор может создавать superadmin' });
+    }
+    // "admin with main admin rights" -> admin role (same panel access)
+    if (role === 'main_admin') role = 'admin';
+    const result = await users.createUser({
+      email,
+      password,
+      name,
+      role,
+      createdBy: req.auth.email,
+    });
+    if (!result.ok) return res.status(400).json(result);
+    if (role === 'user') {
+      mail.sendNewUserNotification(result.user).catch(() => {});
+    }
+    res.json({ ok: true, user: result.user });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось создать пользователя' });
+  }
+});
+
+app.delete('/api/admin/users/:id', auth.adminRequired, (req, res) => {
+  const result = users.deleteUser(req.params.id, {
+    id: req.auth.userId,
+    role: req.auth.role,
+  });
+  if (!result.ok) return res.status(400).json(result);
+  res.json(result);
+});
+
+app.get('/api/admin/online', auth.adminRequired, (_req, res) => {
+  const online = getOnlineSnapshot();
+  res.json({ online, total: online.length, roomsActive: new Set(online.map((o) => o.roomId)).size });
 });
 
 app.post('/api/report', async (req, res) => {

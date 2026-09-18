@@ -258,6 +258,27 @@ button { cursor: pointer; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
 }
+.lobby-cards-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.guest-create-card {
+  margin-top: 1rem;
+}
+.guest-create-card summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+.guest-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.user-create-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
 .card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -476,6 +497,9 @@ button { cursor: pointer; }
   box-shadow: var(--shadow); max-width: 90%;
 }
 
+@media (max-width: 1100px) {
+  .lobby-cards-3 { grid-template-columns: 1fr; }
+}
 @media (max-width: 960px) {
   .lobby-cards, .features { grid-template-columns: 1fr; }
   .room-body { grid-template-columns: 1fr; }
