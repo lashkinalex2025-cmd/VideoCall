@@ -44,6 +44,25 @@ button { cursor: pointer; }
 .view { display: none; }
 .view.active { display: flex; flex-direction: column; }
 
+.app-footer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--muted);
+  padding: 0.35rem 0.75rem calc(0.35rem + env(safe-area-inset-bottom));
+  background: rgba(11, 18, 32, 0.72);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+#room.view.active ~ .app-footer {
+  bottom: 78px;
+  background: rgba(11, 18, 32, 0.55);
+}
+
 /* Кабинеты должны прокручиваться — иначе блок пользователей не видно */
 #adminCabinet.view.active,
 #userCabinet.view.active {
