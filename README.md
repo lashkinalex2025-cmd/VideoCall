@@ -29,9 +29,11 @@
 1. Откройте: https://render.com/deploy?repo=https://github.com/lashkinalex2025-cmd/VideoCall
 2. Войдите через GitHub и подтвердите создание Web Service
 3. Дождитесь деплоя (2–5 минут)
-4. Откройте выданный URL: `https://ВАШ-СЕРВИС.onrender.com` — это и есть рабочее приложение
+4. Откройте выданный URL — это и есть рабочее приложение
 
-После деплоя можете прописать URL в `public/config.js` (`VIDEOCALL_LIVE_URL`), чтобы кнопка «Открыть рабочее приложение» появилась и на GitHub Pages.
+**Рабочая ссылка сейчас:** https://videocall-hfgy.onrender.com
+
+Она же прописана в `public/config.js` (`VIDEOCALL_LIVE_URL`), поэтому на GitHub Pages есть кнопка «Открыть рабочее приложение».
 
 > На бесплатном плане Render сервис «засыпает» без трафика — первый заход может занять ~30–60 секунд.
 
@@ -77,9 +79,10 @@ Safari/Chrome на телефоне требуют **HTTPS** (не `http://192.1
 - MediaRecorder (запись)
 - Опционально SpaceXAI (`grok-4.5`) для резюме отчёта
 
-## Репозиторий
+## Ссылки
 
-https://github.com/lashkinalex2025-cmd/VideoCall.git
+- **Приложение:** https://videocall-hfgy.onrender.com
+- **Репозиторий:** https://github.com/lashkinalex2025-cmd/VideoCall.git
 
 ## Лицензия
 
