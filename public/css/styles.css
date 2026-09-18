@@ -44,6 +44,19 @@ button { cursor: pointer; }
 .view { display: none; }
 .view.active { display: flex; flex-direction: column; }
 
+/* Кабинеты должны прокручиваться — иначе блок пользователей не видно */
+#adminCabinet.view.active,
+#userCabinet.view.active {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+#adminCabinet .admin-wrap,
+#userCabinet .admin-wrap {
+  flex: 1;
+  min-height: 0;
+  padding-bottom: 4rem;
+}
+
 .secure-banner, .phone-hint {
   position: relative;
   z-index: 5;

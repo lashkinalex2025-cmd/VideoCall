@@ -118,17 +118,22 @@ async function renderUsersList() {
   if (!box) return;
   box.innerHTML = '<p class="hint">Загрузка…</p>';
   try {
+    refreshAdminSessionFromStorage();
     const data = await api('/api/admin/users');
     const list = data.users || [];
     if (!list.length) {
       box.innerHTML = '<p class="hint">Пользователей пока нет.</p>';
       return;
     }
-    box.innerHTML = list
-      .map((u) => {
-        const roleLabel =
-          u.role === 'superadmin' ? 'главный admin' : u.role === 'admin' ? 'администратор' : 'пользователь';
-        return `
+    // Newest first
+    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    box.innerHTML =
+      `<p class="hint">Всего пользователей: <strong>${list.length}</strong></p>` +
+      list
+        .map((u) => {
+          const roleLabel =
+            u.role === 'superadmin' ? 'главный admin' : u.role === 'admin' ? 'администратор' : 'пользователь';
+          return `
           <article class="admin-conf-item" data-user-id="${u.id}">
             <div class="admin-conf-main">
               <div class="admin-conf-title">
@@ -144,10 +149,11 @@ async function renderUsersList() {
               <button type="button" class="btn ghost danger-text" data-action="delete-user">Удалить</button>
             </div>
           </article>`;
-      })
-      .join('');
+        })
+        .join('');
   } catch (err) {
-    box.innerHTML = `<p class="hint">Ошибка: ${escapeHtml(err.message)}</p>`;
+    box.innerHTML = `<p class="hint">Ошибка загрузки пользователей: ${escapeHtml(err.message)}</p>`;
+    window.VideoCallApp?.toast(err.message || 'Не удалось загрузить пользователей');
   }
 }
 

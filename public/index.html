@@ -273,28 +273,12 @@
           </div>
         </div>
 
-        <div class="card">
-          <h2>Подключиться к конференции</h2>
-          <p class="hint">Выберите ссылку ниже или введите ID вручную — вход начнёт звонок.</p>
-          <form id="adminJoinForm" class="admin-join-form">
-            <label>Ваше имя
-              <input id="adminJoinName" maxlength="40" required placeholder="Администратор" />
-            </label>
-            <label>ID комнаты
-              <input id="adminJoinRoomId" maxlength="32" required placeholder="id ссылки" />
-            </label>
-            <label>Пароль (если есть)
-              <input id="adminJoinPassword" type="password" maxlength="64" placeholder="необязательно" />
-            </label>
-            <button class="btn primary" type="submit">Войти в конференцию</button>
-          </form>
-        </div>
-
-        <div class="card">
+        <div class="card" id="adminUsersCard">
           <div class="admin-list-head">
             <h2>Пользователи</h2>
-            <button id="adminUsersRefreshBtn" class="btn ghost" type="button">Обновить</button>
+            <button id="adminUsersRefreshBtn" class="btn ghost" type="button">Обновить список</button>
           </div>
+          <p class="hint">Новые регистрации и учётные записи. Можно удалять и добавлять пользователей/админов.</p>
           <div id="adminUsersList" class="admin-conference-list">
             <p class="hint">Загрузка…</p>
           </div>
@@ -315,7 +299,7 @@
                 <option value="admin">Администратор (права как у главного)</option>
               </select>
             </label>
-            <button class="btn secondary" type="submit">Создать учётную запись</button>
+            <button class="btn primary" type="submit">Создать учётную запись</button>
           </form>
         </div>
 
@@ -327,6 +311,23 @@
           <div id="adminOnlineList" class="admin-conference-list">
             <p class="hint">Загрузка…</p>
           </div>
+        </div>
+
+        <div class="card">
+          <h2>Подключиться к конференции</h2>
+          <p class="hint">Выберите ссылку выше или введите ID вручную — вход начнёт звонок.</p>
+          <form id="adminJoinForm" class="admin-join-form">
+            <label>Ваше имя
+              <input id="adminJoinName" maxlength="40" required placeholder="Администратор" />
+            </label>
+            <label>ID комнаты
+              <input id="adminJoinRoomId" maxlength="32" required placeholder="id ссылки" />
+            </label>
+            <label>Пароль (если есть)
+              <input id="adminJoinPassword" type="password" maxlength="64" placeholder="необязательно" />
+            </label>
+            <button class="btn primary" type="submit">Войти в конференцию</button>
+          </form>
         </div>
       </main>
     </section>
