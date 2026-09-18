@@ -303,6 +303,14 @@ button { cursor: pointer; }
   display: flex; flex-direction: column; min-height: 0;
 }
 .side-panel.collapsed { display: none; }
+.side-panel-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.side-panel-top .btn { width: 100%; justify-content: center; }
 .tabs {
   display: grid; grid-template-columns: repeat(4, 1fr);
   border-bottom: 1px solid var(--border);
@@ -319,6 +327,12 @@ button { cursor: pointer; }
   padding: 0.75rem;
   border-bottom: 1px solid var(--border);
 }
+.chat-target {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.chat-target .btn { align-self: flex-start; }
 .chat-messages, .transcript-view, .people-list {
   flex: 1; overflow: auto; padding: 0.75rem; margin: 0;
 }
@@ -389,6 +403,7 @@ button { cursor: pointer; }
     position: absolute; inset: 57px 0 84px 0; z-index: 20;
   }
   .side-panel:not(.open) { display: none; }
+  .side-panel-top { position: sticky; top: 0; background: rgba(11,18,32,0.98); z-index: 2; }
   .room-actions .btn { padding: 0.55rem 0.7rem; font-size: 0.85rem; }
   :root { --ctrl: 64px; }
 }

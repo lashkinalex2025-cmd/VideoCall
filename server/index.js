@@ -412,6 +412,19 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('chat:clear', (payload, ack) => {
+    const ctx = findParticipantBySocket(socket.id);
+    if (!ctx) return ack?.({ ok: false, error: 'Не в комнате' });
+    const { room, participant } = ctx;
+    room.chatHistory = [];
+    io.to(room.id).emit('chat:cleared', {
+      by: participant.id,
+      byName: participant.name,
+      at: Date.now(),
+    });
+    ack?.({ ok: true });
+  });
+
   socket.on('chat:message', (payload, ack) => {
     const ctx = findParticipantBySocket(socket.id);
     if (!ctx) return ack?.({ ok: false, error: 'Не в комнате' });

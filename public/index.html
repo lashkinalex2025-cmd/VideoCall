@@ -155,6 +155,9 @@
         </div>
 
         <aside id="sidePanel" class="side-panel">
+          <div class="side-panel-top">
+            <button id="backToConferenceBtn" class="btn secondary" type="button">← К конференции</button>
+          </div>
           <div class="tabs">
             <button type="button" class="tab active" data-tab="chat">Чат</button>
             <button type="button" class="tab" data-tab="people">Участники</button>
@@ -169,6 +172,7 @@
                   <option value="">Всем участникам</option>
                 </select>
               </label>
+              <button id="clearChatBtn" class="btn ghost" type="button" title="Очистить чат">Очистить чат</button>
             </div>
             <div id="chatMessages" class="chat-messages"></div>
             <form id="chatForm" class="chat-form">

@@ -390,6 +390,11 @@ function wireSocket() {
     appendChat(msg);
   });
 
+  s.on('chat:cleared', (payload) => {
+    $('#chatMessages').innerHTML = '';
+    toast(`Чат очищен${payload?.byName ? ` (${payload.byName})` : ''}`);
+  });
+
   s.on('transcript:segment', (seg) => {
     state.transcript.push({ fromName: seg.fromName, text: seg.text, at: seg.at });
     renderTranscript();
@@ -816,9 +821,33 @@ function initRoomControls() {
     $('#sidePanel').classList.remove('collapsed');
   };
 
-  $('#toggleChatBtn').addEventListener('click', () => openTab('chat'));
+  const closeSidePanel = () => {
+    $('#sidePanel').classList.remove('open');
+    $('#sidePanel').classList.add('collapsed');
+  };
+
+  $('#backToConferenceBtn')?.addEventListener('click', () => {
+    closeSidePanel();
+    toast('Вы вернулись к конференции');
+  });
+
+  $('#toggleChatBtn').addEventListener('click', () => {
+    const panel = $('#sidePanel');
+    if (panel.classList.contains('open') && $('#tab-chat').classList.contains('active')) {
+      closeSidePanel();
+      return;
+    }
+    openTab('chat');
+  });
   $('#toggleParticipantsBtn').addEventListener('click', () => openTab('people'));
   $('#toggleSettingsBtn').addEventListener('click', () => openTab('settings'));
+
+  $('#clearChatBtn')?.addEventListener('click', () => {
+    if (!confirm('Очистить чат для всех участников?')) return;
+    state.socket?.emit('chat:clear', {}, (res) => {
+      if (!res?.ok) toast(res?.error || 'Не удалось очистить чат');
+    });
+  });
 
   $('#chatForm').addEventListener('submit', (e) => {
     e.preventDefault();

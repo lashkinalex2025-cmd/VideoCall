@@ -1,4 +1,4 @@
-const CACHE = 'videocall-v1';
+const CACHE = 'videocall-v3';
 const ASSETS = [
   '/',
   '/index.html',
@@ -31,6 +31,29 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/socket.io')) {
+    return;
+  }
+
+  // Network-first for JS/CSS so fixes deploy immediately
+  const isCode =
+    url.pathname.endsWith('.js') ||
+    url.pathname.endsWith('.css') ||
+    url.pathname.endsWith('.html') ||
+    url.pathname === '/' ||
+    url.pathname === '/index.html';
+
+  if (isCode) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response && response.ok && url.origin === self.location.origin) {
+            const copy = response.clone();
+            caches.open(CACHE).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
     return;
   }
 
