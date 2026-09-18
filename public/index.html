@@ -9,20 +9,47 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="VideoCall" />
-  <link rel="manifest" href="/manifest.json" />
-  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <title>VideoCall</title>
-  <link rel="stylesheet" href="/css/styles.css" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <script src="config.js"></script>
 </head>
 <body>
+  <div id="githubGate" class="github-gate hidden">
+    <div class="github-gate-card">
+      <img src="icons/icon.svg" alt="" width="56" height="56" />
+      <h1>VideoCall на GitHub Pages не запускается</h1>
+      <p>
+        GitHub умеет только показать статичные файлы. Для видеозвонков нужен
+        <b>Node.js-сервер</b> (Socket.IO / WebRTC signaling). Поэтому
+        <code>github.io</code> открывает страницу, но звонки не работают.
+      </p>
+      <p>
+        Опубликуйте приложение на <b>Render</b> (бесплатно) — получите рабочую HTTPS-ссылку
+        для ПК, iPhone и Android.
+      </p>
+      <div class="github-gate-actions">
+        <a id="liveAppLink" class="btn primary hidden" href="#" target="_blank" rel="noopener">Открыть рабочее приложение</a>
+        <a class="btn secondary" href="https://render.com/deploy?repo=https://github.com/lashkinalex2025-cmd/VideoCall" target="_blank" rel="noopener">Deploy на Render</a>
+        <a class="btn ghost" href="https://github.com/lashkinalex2025-cmd/VideoCall" target="_blank" rel="noopener">Репозиторий</a>
+      </div>
+      <ol class="github-gate-steps">
+        <li>Нажмите «Deploy на Render» и войдите через GitHub</li>
+        <li>Создайте Web Service из этого репозитория (Blueprint подхватит <code>render.yaml</code>)</li>
+        <li>Дождитесь деплоя и откройте URL вида <code>https://….onrender.com</code></li>
+      </ol>
+    </div>
+  </div>
+
   <div id="app">
     <!-- Lobby -->
     <section id="lobby" class="view active">
       <div class="lobby-bg"></div>
       <header class="lobby-header">
         <div class="brand">
-          <img src="/icons/icon.svg" alt="" width="40" height="40" />
+          <img src="icons/icon.svg" alt="" width="40" height="40" />
           <div>
             <strong>VideoCall</strong>
             <span>Видеозвонки и конференции</span>
@@ -193,7 +220,38 @@
     </section>
   </div>
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script type="module" src="/js/app.js"></script>
+  <script>
+    (function () {
+      var gate = document.getElementById('githubGate');
+      var app = document.getElementById('app');
+      var isPages = /\.github\.io$/i.test(location.hostname);
+      if (isPages) {
+        gate.classList.remove('hidden');
+        app.classList.add('hidden');
+        var live = window.VIDEOCALL_LIVE_URL;
+        if (live) {
+          var a = document.getElementById('liveAppLink');
+          a.href = live;
+          a.classList.remove('hidden');
+        }
+        return;
+      }
+
+      var s1 = document.createElement('script');
+      s1.src = '/socket.io/socket.io.js';
+      s1.onload = function () {
+        var s2 = document.createElement('script');
+        s2.type = 'module';
+        s2.src = 'js/app.js';
+        document.body.appendChild(s2);
+      };
+      s1.onerror = function () {
+        gate.classList.remove('hidden');
+        app.classList.add('hidden');
+        gate.querySelector('h1').textContent = 'Сервер VideoCall не запущен';
+      };
+      document.body.appendChild(s1);
+    })();
+  </script>
 </body>
 </html>

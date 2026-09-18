@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: videocall
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: VIDEOCALL_CLOUD
+        value: "1"
+      - key: VIDEOCALL_TUNNEL
+        value: "0"
+      - key: VIDEOCALL_LOCAL_HTTPS
+        value: "0"

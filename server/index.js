@@ -12,7 +12,18 @@ const PORT = Number(process.env.PORT) || 3000;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_PARTICIPANTS = 100;
-const ENABLE_TUNNEL = process.env.VIDEOCALL_TUNNEL !== '0';
+const IS_CLOUD =
+  process.env.RENDER === 'true' ||
+  Boolean(process.env.RENDER_EXTERNAL_URL) ||
+  Boolean(process.env.RAILWAY_ENVIRONMENT) ||
+  Boolean(process.env.FLY_APP_NAME) ||
+  process.env.VIDEOCALL_CLOUD === '1';
+const ENABLE_LOCAL_HTTPS =
+  process.env.VIDEOCALL_LOCAL_HTTPS === '1' ||
+  (!IS_CLOUD && process.env.VIDEOCALL_LOCAL_HTTPS !== '0');
+const ENABLE_TUNNEL =
+  process.env.VIDEOCALL_TUNNEL === '1' ||
+  (!IS_CLOUD && process.env.VIDEOCALL_TUNNEL !== '0');
 
 const app = express();
 
@@ -648,19 +659,36 @@ async function startTunnel(port) {
 }
 
 async function main() {
-  const certs = await ensureCerts();
   const httpServer = http.createServer(app);
-  const httpsServer = https.createServer({ key: certs.key, cert: certs.cert }, app);
   io.attach(httpServer);
-  io.attach(httpsServer);
-
   await new Promise((resolve) => httpServer.listen(PORT, HOST, resolve));
+
+  // Render / Railway / Fly дают свой HTTPS — локальный сертификат не нужен
+  if (IS_CLOUD || !ENABLE_LOCAL_HTTPS) {
+    const publicUrl =
+      process.env.RENDER_EXTERNAL_URL ||
+      process.env.VIDEOCALL_PUBLIC_URL ||
+      `http://localhost:${PORT}`;
+    console.log('');
+    console.log('========== VideoCall (cloud) ==========');
+    console.log(`Listening on ${HOST}:${PORT}`);
+    console.log(`Public URL: ${publicUrl}`);
+    console.log('=======================================');
+    return;
+  }
+
+  const certs = await ensureCerts();
+  const httpsServer = https.createServer({ key: certs.key, cert: certs.cert }, app);
+  io.attach(httpsServer);
   await new Promise((resolve) => httpsServer.listen(HTTPS_PORT, HOST, resolve));
   printBanner(null);
-  const tunnelUrl = await startTunnel(PORT);
-  if (tunnelUrl) {
-    console.log(`Интернет:    ${tunnelUrl}   ← откройте ЭТУ ссылку на iPhone/Android`);
-    console.log('================================');
+
+  if (ENABLE_TUNNEL) {
+    const tunnelUrl = await startTunnel(PORT);
+    if (tunnelUrl) {
+      console.log(`Интернет:    ${tunnelUrl}   ← откройте ЭТУ ссылку на iPhone/Android`);
+      console.log('================================');
+    }
   }
 }
 

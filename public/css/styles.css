@@ -72,6 +72,52 @@ button { cursor: pointer; }
 .phone-hint a { color: #fff; font-weight: 600; }
 .phone-hint-note { color: #93c5fd; font-size: 0.85rem !important; }
 
+.github-gate {
+  min-height: 100%;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background:
+    radial-gradient(circle at 15% 20%, rgba(59,130,246,0.25), transparent 35%),
+    radial-gradient(circle at 85% 10%, rgba(6,182,212,0.18), transparent 30%),
+    var(--bg);
+}
+.github-gate.hidden { display: none !important; }
+.github-gate-card {
+  width: min(640px, 100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 1.5rem;
+  box-shadow: var(--shadow);
+}
+.github-gate-card h1 {
+  margin: 0.75rem 0 0.5rem;
+  font-size: clamp(1.35rem, 4vw, 1.8rem);
+  line-height: 1.25;
+}
+.github-gate-card p { color: var(--muted); line-height: 1.45; }
+.github-gate-card code {
+  background: rgba(0,0,0,0.35);
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+}
+.github-gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin: 1rem 0;
+}
+.github-gate-actions .btn { text-decoration: none; display: inline-flex; align-items: center; }
+.github-gate-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .btn {
   border: 1px solid var(--border);
   background: rgba(255,255,255,0.04);
