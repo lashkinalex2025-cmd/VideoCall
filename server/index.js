@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 const { ensureCerts, listLocalIPs } = require('./https');
+const { getIceServers } = require('./ice');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
@@ -148,13 +149,24 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'VideoCall', rooms: rooms.size });
 });
 
+app.get('/api/ice', async (_req, res) => {
+  try {
+    const cfg = await getIceServers();
+    res.json(cfg);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'ICE config unavailable' });
+  }
+});
+
 app.get('/api/info', (_req, res) => {
   const ips = listLocalIPs().filter((ip) => ip !== '127.0.0.1');
   res.json({
     ok: true,
     httpPort: PORT,
     httpsPort: HTTPS_PORT,
-    lanHttps: ips.map((ip) => `https://${ip}:${HTTPS_PORT}`),
+    lanHttps: IS_CLOUD ? [] : ips.map((ip) => `https://${ip}:${HTTPS_PORT}`),
+    publicUrl: process.env.RENDER_EXTERNAL_URL || process.env.VIDEOCALL_PUBLIC_URL || '',
     tip: 'На iPhone/Android открывайте HTTPS-ссылку, не HTTP.',
   });
 });

@@ -116,14 +116,20 @@ function initLobby() {
     if (usePassword && !password) return toast('Укажите пароль или снимите галочку');
     saveLobbyName(name);
 
+    // Важно: камера/мик на iOS только из жеста пользователя — запрашиваем СРАЗУ
+    const localStream = await acquireMediaInGesture();
+
     const res = await fetch('/api/rooms', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: roomName, roomId: roomId || undefined, password }),
     });
     const data = await res.json();
-    if (!res.ok) return toast(data.error || 'Ошибка создания');
-    await enterRoom({ roomId: data.id, name, password });
+    if (!res.ok) {
+      localStream?.getTracks().forEach((t) => t.stop());
+      return toast(data.error || 'Ошибка создания');
+    }
+    await enterRoom({ roomId: data.id, name, password, localStream });
   });
 
   $('#joinForm').addEventListener('submit', async (e) => {
@@ -132,7 +138,8 @@ function initLobby() {
     const roomId = $('#joinRoomId').value.trim();
     const password = $('#joinPassword').value;
     saveLobbyName(name);
-    await enterRoom({ roomId, name, password });
+    const localStream = await acquireMediaInGesture();
+    await enterRoom({ roomId, name, password, localStream });
   });
 
   const params = new URLSearchParams(location.search);
@@ -140,10 +147,72 @@ function initLobby() {
   if (qRoom) {
     $('#joinRoomId').value = qRoom;
     showView('lobby');
+    const joinCard = $('#joinForm');
+    if (joinCard) {
+      joinCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      toast('Нажмите «Присоединиться» и разрешите камеру/микрофон');
+    }
   }
 }
 
-async function enterRoom({ roomId, name, password }) {
+/**
+ * getUserMedia должен вызываться сразу из клика/submit — иначе iOS/Android блокируют.
+ */
+async function acquireMediaInGesture() {
+  if (!isSecureEnough()) {
+    showSecureBannerIfNeeded();
+    toast('Откройте приложение по HTTPS');
+    return null;
+  }
+  try {
+    const stream = await getMediaSafe({ audio: true, video: true });
+    state.audioEnabled = true;
+    state.videoEnabled = Boolean(stream.getVideoTracks().length);
+    return stream;
+  } catch (err) {
+    console.warn('media gesture failed', err);
+    try {
+      const audioOnly = await getMediaSafe({ audio: true, video: false });
+      state.audioEnabled = true;
+      state.videoEnabled = false;
+      toast('Камера недоступна — только микрофон');
+      return audioOnly;
+    } catch (err2) {
+      state.audioEnabled = false;
+      state.videoEnabled = false;
+      if (err?.code === 'INSECURE_CONTEXT') {
+        toast('Нужен HTTPS для камеры на телефоне');
+      } else {
+        toast('Нет доступа к камере/микрофону — зайдите и нажмите 🎤/📷');
+      }
+      return new MediaStream();
+    }
+  }
+}
+
+async function loadIceConfig() {
+  try {
+    const cfg = await fetch('/api/ice', { cache: 'no-store' }).then((r) => r.json());
+    if (cfg?.iceServers?.length) {
+      return {
+        iceServers: cfg.iceServers,
+        iceTransportPolicy: cfg.iceTransportPolicy || 'all',
+        iceCandidatePoolSize: cfg.iceCandidatePoolSize || 8,
+      };
+    }
+  } catch (err) {
+    console.warn('ICE fetch failed', err);
+  }
+  return {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+    iceCandidatePoolSize: 8,
+  };
+}
+
+async function enterRoom({ roomId, name, password, localStream = null }) {
   if (!isSecureEnough()) {
     showSecureBannerIfNeeded();
     toast('Откройте приложение по HTTPS (см. баннер сверху)');
@@ -152,11 +221,17 @@ async function enterRoom({ roomId, name, password }) {
 
   toast('Подключение…');
 
+  // Если медиа ещё не взяли (редкий путь) — пробуем сейчас
+  if (!localStream) {
+    localStream = await acquireMediaInGesture();
+  }
+
   if (!state.socket) {
     state.socket = io({
       transports: ['websocket', 'polling'],
       upgrade: true,
       rememberUpgrade: true,
+      forceNew: false,
     });
     wireSocket();
   }
@@ -164,7 +239,7 @@ async function enterRoom({ roomId, name, password }) {
   if (!state.socket.connected) {
     try {
       await new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('Нет связи с сервером')), 8000);
+        const t = setTimeout(() => reject(new Error('Нет связи с сервером')), 12000);
         state.socket.once('connect', () => {
           clearTimeout(t);
           resolve();
@@ -181,6 +256,8 @@ async function enterRoom({ roomId, name, password }) {
     }
   }
 
+  const iceConfig = await loadIceConfig();
+
   state.socket.emit('room:join', { roomId, name, password }, async (res) => {
     if (!res?.ok) {
       toast(res?.error || 'Не удалось войти');
@@ -196,6 +273,7 @@ async function enterRoom({ roomId, name, password }) {
       at: s.at,
     }));
     state.peers.clear();
+    state.streams.clear();
     for (const p of res.peers || []) state.peers.set(p.id, p);
     for (const p of res.room.participants || []) {
       if (p.id !== state.self.id) state.peers.set(p.id, p);
@@ -210,9 +288,11 @@ async function enterRoom({ roomId, name, password }) {
     updateSettingsAccess();
 
     try {
+      state.call?.destroy();
       state.call = new MeshCall({
         socket: state.socket,
         selfId: state.self.id,
+        iceConfig,
         onRemoteStream: (peerId, stream) => {
           state.streams.set(peerId, stream);
           renderVideos();
@@ -221,38 +301,24 @@ async function enterRoom({ roomId, name, password }) {
           state.streams.delete(peerId);
           renderVideos();
         },
-        onError: (m) => toast(m),
+        onError: (m) => console.warn(m),
       });
 
-      try {
-        await state.call.initLocal({ audio: true, video: true });
-        state.audioEnabled = true;
-        state.videoEnabled = true;
-      } catch (err) {
-        console.warn('media init failed', err);
-        state.audioEnabled = false;
-        state.videoEnabled = false;
-        if (err?.code === 'INSECURE_CONTEXT') {
-          toast('Нужен HTTPS для камеры на телефоне');
-        } else {
-          try {
-            state.call.localStream = await getMediaSafe({ audio: true, video: false });
-            state.audioEnabled = true;
-            toast('Камера недоступна — только микрофон');
-          } catch (_) {
-            state.call.localStream = new MediaStream();
-            toast('Без камеры/микрофона — можно пользоваться чатом');
-          }
-        }
-      }
+      state.call.setLocalStream(localStream || new MediaStream());
+      state.audioEnabled = Boolean(localStream?.getAudioTracks().some((t) => t.enabled !== false && t.readyState !== 'ended'));
+      state.videoEnabled = Boolean(localStream?.getVideoTracks().some((t) => t.enabled !== false && t.readyState !== 'ended'));
 
       $('#micBtn').classList.toggle('off', !state.audioEnabled);
       $('#camBtn').classList.toggle('off', !state.videoEnabled);
 
       renderVideos();
+
+      // Только НОВЫЙ участник инициирует WebRTC к уже сидящим.
+      // Старые участники ждут offer и отвечают answer — иначе glare и нет чужого видео.
       for (const peer of state.peers.values()) {
-        await state.call.connectToPeer(peer.id);
+        await state.call.connectToPeer(peer.id, { initiator: true });
       }
+
       emitMediaState();
       history.replaceState({}, '', `/?room=${encodeURIComponent(state.room.id)}`);
       toast(`Вы в комнате «${state.room.name}»`);
@@ -271,7 +337,11 @@ function wireSocket() {
     renderPeople();
     updateChatTargets();
     toast(`${p.name} присоединился(ась)`);
-    if (state.call) await state.call.connectToPeer(p.id);
+    // Не создаём offer здесь: новый участник сам звонит нам.
+    // Готовим PC без initiator, чтобы быстрее принять его offer (опционально).
+    if (state.call) {
+      await state.call.connectToPeer(p.id, { initiator: false });
+    }
     renderVideos();
   });
 
@@ -367,6 +437,11 @@ function emitMediaState() {
   });
 }
 
+async function applyFreshLocalStream(stream) {
+  if (!state.call) return;
+  await state.call.replaceLocalTracks(stream);
+}
+
 function updateRoomHeader() {
   if (!state.room) return;
   $('#roomNameLabel').textContent = state.room.name;
@@ -377,9 +452,9 @@ function updateRoomHeader() {
 
 function renderVideos() {
   const grid = $('#videoGrid');
-  grid.innerHTML = '';
-  const entries = [];
+  if (!state.self) return;
 
+  const entries = [];
   entries.push({
     id: state.self.id,
     name: `${state.self.name} (вы)`,
@@ -398,8 +473,8 @@ function renderVideos() {
       name: p.name,
       stream: state.streams.get(p.id),
       self: false,
-      audioEnabled: p.audioEnabled,
-      videoEnabled: p.videoEnabled,
+      audioEnabled: p.audioEnabled !== false,
+      videoEnabled: p.videoEnabled !== false,
       screenSharing: p.screenSharing,
       handRaised: p.handRaised,
       role: p.role,
@@ -407,29 +482,46 @@ function renderVideos() {
   }
 
   grid.classList.toggle('solo', entries.length === 1);
+  const keep = new Set(entries.map((e) => e.id));
+
+  // Удаляем плитки ушедших
+  [...grid.querySelectorAll('.tile')].forEach((tile) => {
+    if (!keep.has(tile.dataset.id)) tile.remove();
+  });
 
   for (const e of entries) {
-    const tile = document.createElement('div');
-    tile.className = 'tile' + (e.self ? ' self' : '') + (e.screenSharing ? ' screen-share' : '');
-    tile.dataset.id = e.id;
+    let tile = [...grid.querySelectorAll('.tile')].find((t) => t.dataset.id === e.id);
+    let video;
+    if (!tile) {
+      tile = document.createElement('div');
+      tile.dataset.id = e.id;
+      video = document.createElement('video');
+      video.autoplay = true;
+      video.playsInline = true;
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('webkit-playsinline', 'true');
+      video.setAttribute('autoplay', 'true');
+      const meta = document.createElement('div');
+      meta.className = 'tile-meta';
+      tile.appendChild(video);
+      tile.appendChild(meta);
+      grid.appendChild(tile);
+    } else {
+      video = tile.querySelector('video');
+    }
 
-    const video = document.createElement('video');
-    video.autoplay = true;
+    tile.className = 'tile' + (e.self ? ' self' : '') + (e.screenSharing ? ' screen-share' : '');
     video.muted = Boolean(e.self);
-    video.playsInline = true;
-    video.setAttribute('playsinline', 'true');
-    video.setAttribute('webkit-playsinline', 'true');
-    video.setAttribute('autoplay', 'true');
     if (e.self) video.setAttribute('muted', 'true');
-    if (e.stream) {
+
+    if (e.stream && video.srcObject !== e.stream) {
       video.srcObject = e.stream;
       const play = () => video.play().catch(() => {});
       play();
       video.addEventListener('loadedmetadata', play, { once: true });
     }
 
-    const meta = document.createElement('div');
-    meta.className = 'tile-meta';
+    const meta = tile.querySelector('.tile-meta');
     meta.innerHTML = `
       <span>${escapeHtml(e.name)}${e.role === 'host' ? ' · хост' : e.role === 'cohost' ? ' · со-хост' : ''}</span>
       <div class="tile-badges">
@@ -438,10 +530,6 @@ function renderVideos() {
         <span class="badge ${e.audioEnabled ? '' : 'off'}">${e.audioEnabled ? 'mic' : 'mic off'}</span>
         <span class="badge ${e.videoEnabled || e.screenSharing ? '' : 'off'}">${e.videoEnabled || e.screenSharing ? 'cam' : 'cam off'}</span>
       </div>`;
-
-    tile.appendChild(video);
-    tile.appendChild(meta);
-    grid.appendChild(tile);
   }
   updateRoomHeader();
 }
@@ -575,11 +663,24 @@ function initRoomControls() {
     if (!state.room?.permissions?.allowUnmute && !state.audioEnabled && !canModerate()) {
       return toast('Хост запретил включать микрофон');
     }
-    state.audioEnabled = !state.audioEnabled;
-    await state.call?.setAudioEnabled(state.audioEnabled);
-    $('#micBtn').classList.toggle('off', !state.audioEnabled);
-    emitMediaState();
-    renderVideos();
+    try {
+      const hasAudio = state.call?.localStream?.getAudioTracks()?.some((t) => t.readyState === 'live');
+      if (!state.audioEnabled && !hasAudio) {
+        const stream = await getMediaSafe({ audio: true, video: state.videoEnabled });
+        await applyFreshLocalStream(stream);
+        state.audioEnabled = true;
+        state.videoEnabled = Boolean(stream.getVideoTracks().length);
+      } else {
+        state.audioEnabled = !state.audioEnabled;
+        await state.call?.setAudioEnabled(state.audioEnabled);
+      }
+      $('#micBtn').classList.toggle('off', !state.audioEnabled);
+      $('#camBtn').classList.toggle('off', !state.videoEnabled);
+      emitMediaState();
+      renderVideos();
+    } catch (err) {
+      toast('Не удалось включить микрофон');
+    }
   });
 
   $('#camBtn').addEventListener('click', async () => {
@@ -587,11 +688,24 @@ function initRoomControls() {
     if (!state.room?.permissions?.allowVideo && !state.videoEnabled && !canModerate()) {
       return toast('Хост запретил включать камеру');
     }
-    state.videoEnabled = !state.videoEnabled;
-    await state.call?.setVideoEnabled(state.videoEnabled);
-    $('#camBtn').classList.toggle('off', !state.videoEnabled);
-    emitMediaState();
-    renderVideos();
+    try {
+      const hasVideo = state.call?.localStream?.getVideoTracks()?.some((t) => t.readyState === 'live');
+      if (!state.videoEnabled && !hasVideo) {
+        const stream = await getMediaSafe({ audio: true, video: true });
+        await applyFreshLocalStream(stream);
+        state.audioEnabled = true;
+        state.videoEnabled = true;
+      } else {
+        state.videoEnabled = !state.videoEnabled;
+        await state.call?.setVideoEnabled(state.videoEnabled);
+      }
+      $('#micBtn').classList.toggle('off', !state.audioEnabled);
+      $('#camBtn').classList.toggle('off', !state.videoEnabled);
+      emitMediaState();
+      renderVideos();
+    } catch (err) {
+      toast('Не удалось включить камеру — разрешите доступ в настройках браузера');
+    }
   });
 
   if (!navigator.mediaDevices?.getDisplayMedia) {
