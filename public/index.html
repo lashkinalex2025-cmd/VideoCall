@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="description" content="VideoCall — онлайн видеозвонки и конференции для команды" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="VideoCall" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <title>VideoCall</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Lobby -->
+    <section id="lobby" class="view active">
+      <div class="lobby-bg"></div>
+      <header class="lobby-header">
+        <div class="brand">
+          <img src="/icons/icon.svg" alt="" width="40" height="40" />
+          <div>
+            <strong>VideoCall</strong>
+            <span>Видеозвонки и конференции</span>
+          </div>
+        </div>
+        <button id="installBtn" class="btn ghost hidden" type="button">Установить приложение</button>
+      </header>
+
+      <main class="lobby-main">
+        <div class="hero">
+          <h1>Встречи без лимита по времени</h1>
+          <p>
+            Голос, видео, чат, демонстрация экрана, запись, транскрипция и отчёты —
+            для вас и вашей команды. До 100 участников.
+          </p>
+        </div>
+
+        <div class="lobby-cards">
+          <form id="createForm" class="card">
+            <h2>Создать комнату</h2>
+            <label>Ваше имя
+              <input id="createName" name="name" maxlength="40" required placeholder="Иван" autocomplete="name" />
+            </label>
+            <label>Название встречи
+              <input id="createRoomName" name="roomName" maxlength="80" placeholder="Планерка команды" />
+            </label>
+            <label>ID комнаты (необязательно)
+              <input id="createRoomId" name="roomId" maxlength="32" placeholder="автоматически" pattern="[A-Za-z0-9_-]*" />
+            </label>
+            <label class="checkbox">
+              <input id="createUsePassword" type="checkbox" />
+              Защитить паролем
+            </label>
+            <label id="createPasswordWrap" class="hidden">Пароль
+              <input id="createPassword" type="password" maxlength="64" placeholder="Пароль комнаты" autocomplete="new-password" />
+            </label>
+            <button class="btn primary" type="submit">Создать и войти</button>
+          </form>
+
+          <form id="joinForm" class="card">
+            <h2>Войти в комнату</h2>
+            <label>Ваше имя
+              <input id="joinName" name="name" maxlength="40" required placeholder="Мария" autocomplete="name" />
+            </label>
+            <label>ID комнаты
+              <input id="joinRoomId" name="roomId" maxlength="32" required placeholder="например abc12def" />
+            </label>
+            <label>Пароль (если есть)
+              <input id="joinPassword" type="password" maxlength="64" placeholder="необязательно" autocomplete="current-password" />
+            </label>
+            <button class="btn secondary" type="submit">Присоединиться</button>
+          </form>
+        </div>
+
+        <ul class="features">
+          <li>Web / PWA / установка на Android</li>
+          <li>Адаптив: телефон, планшет, ПК</li>
+          <li>Чат общий и личный</li>
+          <li>Запись на компьютер</li>
+          <li>Транскрипция и отчёт</li>
+          <li>Права и роли участников</li>
+        </ul>
+      </main>
+    </section>
+
+    <!-- Room -->
+    <section id="room" class="view">
+      <header class="room-top">
+        <div class="room-title">
+          <button id="leaveBtn" class="btn icon" type="button" title="Выйти">←</button>
+          <div>
+            <strong id="roomNameLabel">Комната</strong>
+            <span id="roomMeta">ID: —</span>
+          </div>
+        </div>
+        <div class="room-actions">
+          <button id="copyLinkBtn" class="btn ghost" type="button">Ссылка</button>
+          <button id="toggleParticipantsBtn" class="btn ghost" type="button">Участники</button>
+          <button id="toggleChatBtn" class="btn ghost" type="button">Чат</button>
+          <button id="toggleSettingsBtn" class="btn ghost" type="button">Настройки</button>
+        </div>
+      </header>
+
+      <div class="room-body">
+        <div class="stage">
+          <div id="videoGrid" class="video-grid"></div>
+          <div id="toast" class="toast hidden"></div>
+        </div>
+
+        <aside id="sidePanel" class="side-panel">
+          <div class="tabs">
+            <button type="button" class="tab active" data-tab="chat">Чат</button>
+            <button type="button" class="tab" data-tab="people">Участники</button>
+            <button type="button" class="tab" data-tab="transcript">Транскрипция</button>
+            <button type="button" class="tab" data-tab="settings">Права</button>
+          </div>
+
+          <div id="tab-chat" class="tab-panel active">
+            <div class="chat-target">
+              <label>Кому
+                <select id="chatTarget">
+                  <option value="">Всем участникам</option>
+                </select>
+              </label>
+            </div>
+            <div id="chatMessages" class="chat-messages"></div>
+            <form id="chatForm" class="chat-form">
+              <input id="chatInput" maxlength="4000" placeholder="Сообщение…" autocomplete="off" />
+              <button class="btn primary" type="submit">→</button>
+            </form>
+          </div>
+
+          <div id="tab-people" class="tab-panel">
+            <ul id="peopleList" class="people-list"></ul>
+          </div>
+
+          <div id="tab-transcript" class="tab-panel">
+            <div class="transcript-toolbar">
+              <button id="toggleTranscriptBtn" class="btn secondary" type="button">Включить транскрипцию</button>
+              <button id="downloadReportBtn" class="btn ghost" type="button">Скачать отчёт</button>
+            </div>
+            <div id="transcriptView" class="transcript-view"></div>
+          </div>
+
+          <div id="tab-settings" class="tab-panel">
+            <div id="hostOnlySettings" class="settings-block">
+              <h3>Права комнаты (хост / со-хост)</h3>
+              <label class="checkbox"><input type="checkbox" data-perm="allowChat" checked /> Общий чат</label>
+              <label class="checkbox"><input type="checkbox" data-perm="allowPrivateChat" checked /> Личные сообщения</label>
+              <label class="checkbox"><input type="checkbox" data-perm="allowScreenShare" checked /> Демонстрация экрана</label>
+              <label class="checkbox"><input type="checkbox" data-perm="allowUnmute" checked /> Участники могут включать микрофон</label>
+              <label class="checkbox"><input type="checkbox" data-perm="allowVideo" checked /> Участники могут включать камеру</label>
+              <label class="checkbox"><input type="checkbox" data-perm="lockRoom" /> Заблокировать вход новых</label>
+              <div class="password-admin">
+                <h3>Пароль комнаты</h3>
+                <input id="newRoomPassword" type="password" placeholder="Новый пароль (пусто = без пароля)" />
+                <button id="savePasswordBtn" class="btn secondary" type="button">Сохранить пароль</button>
+              </div>
+            </div>
+            <p id="settingsHint" class="hint">Настройки доступны хосту и со-хостам.</p>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="controls">
+        <button id="micBtn" class="ctrl" type="button" title="Микрофон"><span>🎤</span><small>Микрофон</small></button>
+        <button id="camBtn" class="ctrl" type="button" title="Камера"><span>📷</span><small>Камера</small></button>
+        <button id="screenBtn" class="ctrl" type="button" title="Экран"><span>🖥️</span><small>Экран</small></button>
+        <button id="recordBtn" class="ctrl" type="button" title="Запись"><span>⏺️</span><small>Запись</small></button>
+        <button id="handBtn" class="ctrl" type="button" title="Рука"><span>✋</span><small>Рука</small></button>
+        <button id="hangupBtn" class="ctrl danger" type="button" title="Выйти"><span>📞</span><small>Выйти</small></button>
+      </footer>
+    </section>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
