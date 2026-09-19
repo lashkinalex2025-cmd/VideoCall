@@ -297,34 +297,39 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
       state.relay?.destroy();
       state.webrtcPeers.clear();
 
+      // Relay — основной путь чужого видео между разными сетями (без TURN-ключей).
+      state.relay = new SocketMediaRelay({
+        socket: state.socket,
+        selfId: state.self.id,
+        onRemoteStream: (peerId, stream) => {
+          state.streams.set(peerId, stream);
+          renderVideos();
+        },
+        onError: (m) => console.warn(m),
+      });
+
+      // WebRTC оставляем как доп. попытку в одной LAN; UI берёт relay-поток.
       state.call = new MeshCall({
         socket: state.socket,
         selfId: state.self.id,
         iceConfig,
         onRemoteStream: (peerId, stream) => {
+          const liveVideo = stream
+            ?.getVideoTracks()
+            ?.some((t) => t.readyState === 'live' && t.muted === false);
+          if (!liveVideo) return;
           state.webrtcPeers.add(peerId);
+          // Не перебиваем уже идущий relay, если WebRTC ещё «пустой».
+          const cur = state.streams.get(peerId);
+          const relayWorking = cur && cur !== stream;
+          if (relayWorking) return;
           state.streams.set(peerId, stream);
           renderVideos();
         },
         onPeerLeft: (peerId) => {
           state.webrtcPeers.delete(peerId);
           state.relay?.removePeer(peerId);
-          if (!state.streams.has(peerId)) renderVideos();
-          else {
-            state.streams.delete(peerId);
-            renderVideos();
-          }
-        },
-        onError: (m) => console.warn(m),
-      });
-
-      // Запасной канал через Socket.IO — чужое видео между разными сетями без TURN
-      state.relay = new SocketMediaRelay({
-        socket: state.socket,
-        selfId: state.self.id,
-        onRemoteStream: (peerId, stream) => {
-          if (state.webrtcPeers.has(peerId)) return;
-          state.streams.set(peerId, stream);
+          state.streams.delete(peerId);
           renderVideos();
         },
         onError: (m) => console.warn(m),
@@ -341,12 +346,15 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
       renderVideos();
 
       // Только НОВЫЙ участник инициирует WebRTC к уже сидящим.
-      // Старые участники ждут offer и отвечают answer — иначе glare и нет чужого видео.
       for (const peer of state.peers.values()) {
         await state.call.connectToPeer(peer.id, { initiator: true });
       }
 
       state.relay.start();
+      for (const peer of state.peers.values()) {
+        state.relay.ensurePeer(peer.id);
+      }
+      state.relay.resumeAudio().catch(() => {});
 
       emitMediaState();
       history.replaceState({}, '', `/?room=${encodeURIComponent(state.room.id)}`);
@@ -363,6 +371,7 @@ function wireSocket() {
 
   s.on('participant:joined', (p) => {
     state.peers.set(p.id, p);
+    state.relay?.ensurePeer?.(p.id);
     renderPeople();
     updateChatTargets();
     toast(`${p.name} присоединился(ась)`);
@@ -490,28 +499,39 @@ function updateRoomHeader() {
  */
 function ensureVideoPlaying(video, { remote = false } = {}) {
   const tryPlay = () => {
+    if (remote) {
+      // Remote (в т.ч. canvas.captureStream): сначала muted — иначе mobile блокирует play
+      video.muted = true;
+    }
     const p = video.play();
-    if (!p || !p.then) return;
-    p.catch(() => {
+    if (!p || !p.then) {
+      if (remote) unmuteRemoteSoon(video);
+      return;
+    }
+    p.then(() => {
+      if (remote) unmuteRemoteSoon(video);
+    }).catch(() => {
       if (!remote) return;
-      const wasMuted = video.muted;
       video.muted = true;
       video.play()
-        .then(() => {
-          // После успешного старта пробуем включить звук
-          setTimeout(() => {
-            video.muted = wasMuted;
-            video.play().catch(() => {
-              video.muted = true;
-            });
-          }, 300);
-        })
+        .then(() => unmuteRemoteSoon(video))
         .catch(() => {});
     });
   };
   tryPlay();
   video.addEventListener('loadedmetadata', tryPlay, { once: true });
   video.addEventListener('canplay', tryPlay, { once: true });
+}
+
+function unmuteRemoteSoon(video) {
+  setTimeout(() => {
+    if (!video.isConnected || video.closest('.tile.self')) return;
+    state.relay?.resumeAudio?.().catch(() => {});
+    video.muted = false;
+    video.play().catch(() => {
+      video.muted = true;
+    });
+  }, 200);
 }
 
 function renderVideos() {
@@ -725,6 +745,15 @@ function updateSettingsAccess() {
 }
 
 function initRoomControls() {
+  // Любой тап в комнате — разблокировать AudioContext на телефоне
+  $('#room')?.addEventListener(
+    'pointerdown',
+    () => {
+      state.relay?.resumeAudio?.().catch(() => {});
+    },
+    { passive: true }
+  );
+
   $('#micBtn').addEventListener('click', async () => {
     if (!state.room?.permissions?.allowUnmute && !state.audioEnabled && !canModerate()) {
       return toast('Хост запретил включать микрофон');

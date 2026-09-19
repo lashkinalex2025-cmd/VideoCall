@@ -48,7 +48,8 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 
 const io = new Server({
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  maxHttpBufferSize: 5e6,
+  maxHttpBufferSize: 8e6,
+  perMessageDeflate: false,
 });
 
 /** @type {Map<string, Room>} */
