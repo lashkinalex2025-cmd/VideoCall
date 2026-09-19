@@ -67,23 +67,16 @@ const DEFAULT_ICE = {
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
   ],
-  iceCandidatePoolSize: 4,
+  iceCandidatePoolSize: 8,
   bundlePolicy: 'max-bundle',
   rtcpMuxPolicy: 'require',
 };
 
-/**
- * Mesh WebRTC:
- * - Perfect negotiation (polite peer = lexicographically smaller id) — без glare
- * - Треки цепляются через replaceTrack на существующие transceiver (без лишних m-line)
- * - При failed ICE — restartIce + повторный offer; при необходимости relay-only
- */
 export class MeshCall {
   constructor({ socket, selfId, iceConfig, onRemoteStream, onPeerLeft, onError, onPeerState }) {
     this.socket = socket;
     this.selfId = selfId;
-    this.baseIceConfig = iceConfig || DEFAULT_ICE;
-    this.iceConfig = { ...this.baseIceConfig };
+    this.iceConfig = iceConfig || DEFAULT_ICE;
     this.onRemoteStream = onRemoteStream;
     this.onPeerLeft = onPeerLeft;
     this.onError = onError || (() => {});
@@ -93,14 +86,9 @@ export class MeshCall {
     this.remoteStreams = new Map();
     this.makingOffer = new Set();
     this.ignoreOffer = Object.create(null);
-    this.relayTried = new Set();
     this.localStream = null;
     this.screenStream = null;
     this.retryTimers = new Map();
-  }
-
-  isPolite(peerId) {
-    return String(this.selfId) < String(peerId);
   }
 
   setLocalStream(stream) {
@@ -112,10 +100,8 @@ export class MeshCall {
     return this.localStream;
   }
 
-  /**
-   * Новый участник инициирует связь со всеми уже в комнате.
-   * Уже сидящие тоже могут отвечать через perfect negotiation, если придёт offer.
-   */
+  // Only the joining client should call this with initiator:true.
+  // Existing peers must wait for the inbound offer and answer it.
   async connectToPeer(peerId, { initiator = true } = {}) {
     if (peerId === this.selfId) return;
     if (!initiator) return;
@@ -126,17 +112,12 @@ export class MeshCall {
     }
 
     const pc = this.createPeerConnection(peerId);
-    this.attachLocalMedia(pc, { preferAddTrack: true });
+    this.attachLocalMedia(pc);
     await this.safeOffer(peerId);
     this.scheduleRetry(peerId);
   }
 
-  /**
-   * Надёжная привязка локальных треков:
-   * - если transceiver уже есть (после remote offer) → replaceTrack + sendrecv
-   * - иначе addTrack / addTransceiver
-   */
-  attachLocalMedia(pc, { preferAddTrack = false } = {}) {
+  attachLocalMedia(pc) {
     const stream = this.localStream || new MediaStream();
     const audio =
       stream.getAudioTracks().find((t) => t.readyState === 'live') ||
@@ -148,52 +129,32 @@ export class MeshCall {
       null;
 
     const ensureKind = (kind, track) => {
-      const senders = pc.getSenders();
-      const existingWithTrack = senders.find((s) => s.track && s.track.kind === kind);
-      if (existingWithTrack) {
-        if (track && existingWithTrack.track !== track) {
-          existingWithTrack.replaceTrack(track).catch(() => {});
+      const existingSender = pc.getSenders().find((s) => s.track && s.track.kind === kind);
+      if (existingSender) {
+        if (track && existingSender.track !== track) {
+          existingSender.replaceTrack(track);
         }
-        if (existingWithTrack.track) existingWithTrack.track.enabled = true;
         return;
       }
 
-      const transceiver = pc.getTransceivers().find((t) => {
-        const recvKind = t.receiver?.track?.kind;
-        const sendKind = t.sender?.track?.kind;
-        return (recvKind === kind || sendKind === kind) && !t.sender?.track;
-      });
+      // After a remote offer, a sender may exist with null track for this kind.
+      const transceiver = pc
+        .getTransceivers()
+        .find((t) => t.receiver.track && t.receiver.track.kind === kind && !t.sender.track);
 
       if (track) {
         if (transceiver) {
-          transceiver.sender.replaceTrack(track).catch(() => {});
+          transceiver.sender.replaceTrack(track);
           try {
             transceiver.direction = 'sendrecv';
           } catch (_) {
             /* ignore */
           }
-        } else if (preferAddTrack || pc.signalingState === 'stable') {
-          try {
-            pc.addTrack(track, stream);
-          } catch (_) {
-            pc.addTransceiver(track, { direction: 'sendrecv', streams: [stream] });
-          }
         } else {
-          // После remote offer без подходящего transceiver — addTransceiver может сломать SDP.
-          // Пробуем addTrack; браузер обычно сопоставляет m-line.
-          try {
-            pc.addTrack(track, stream);
-          } catch (err) {
-            console.warn('addTrack failed', kind, err);
-          }
+          pc.addTrack(track, stream);
         }
-      } else {
-        const hasKind = pc
-          .getTransceivers()
-          .some((t) => t.receiver?.track?.kind === kind || t.sender?.track?.kind === kind);
-        if (!hasKind) {
-          pc.addTransceiver(kind, { direction: 'recvonly' });
-        }
+      } else if (!pc.getTransceivers().some((t) => t.receiver.track && t.receiver.track.kind === kind)) {
+        pc.addTransceiver(kind, { direction: 'recvonly' });
       }
     };
 
@@ -218,125 +179,51 @@ export class MeshCall {
     };
 
     pc.ontrack = (event) => {
-      let stream = this.remoteStreams.get(peerId);
+      let stream;
       if (event.streams && event.streams[0]) {
         stream = event.streams[0];
       } else {
-        stream = stream || new MediaStream();
+        stream = this.remoteStreams.get(peerId) || new MediaStream();
         if (!stream.getTracks().includes(event.track)) {
           stream.addTrack(event.track);
         }
       }
-      // Гарантируем, что все receiver tracks этого PC в одном stream для UI
-      for (const receiver of pc.getReceivers()) {
-        const t = receiver.track;
-        if (t && !stream.getTracks().includes(t)) {
-          try {
-            stream.addTrack(t);
-          } catch (_) {
-            /* ignore */
-          }
-        }
-      }
       this.remoteStreams.set(peerId, stream);
       event.track.onunmute = () => this.onRemoteStream(peerId, stream);
-      event.track.onended = () => this.onRemoteStream(peerId, stream);
       this.onRemoteStream(peerId, stream);
       this.clearRetry(peerId);
-      this.onPeerState(peerId, pc.connectionState || 'connected');
     };
 
     pc.onconnectionstatechange = () => {
-      const st = pc.connectionState;
-      this.onPeerState(peerId, st);
-      if (st === 'connected') {
-        this.clearRetry(peerId);
-        // Если connected, но remote stream пуст — подождём и предложим restart
-        setTimeout(() => {
-          const rs = this.remoteStreams.get(peerId);
-          const hasMedia = rs && rs.getTracks().some((t) => t.readyState === 'live');
-          if (!hasMedia && this.pcs.get(peerId) === pc) {
-            this.scheduleRetry(peerId, 500);
-          }
-        }, 2500);
-      }
-      if (st === 'failed' || st === 'disconnected') {
-        this.recoverPeer(peerId, st === 'failed');
+      this.onPeerState(peerId, pc.connectionState);
+      if (pc.connectionState === 'connected') this.clearRetry(peerId);
+      if (pc.connectionState === 'failed') {
+        try {
+          pc.restartIce();
+        } catch (_) {
+          /* ignore */
+        }
+        this.scheduleRetry(peerId, 800);
       }
     };
 
     pc.oniceconnectionstatechange = () => {
-      const st = pc.iceConnectionState;
-      if (st === 'connected' || st === 'completed') {
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         this.clearRetry(peerId);
       }
-      if (st === 'failed') {
-        this.recoverPeer(peerId, true);
+      if (pc.iceConnectionState === 'failed') {
+        try {
+          pc.restartIce();
+        } catch (_) {
+          /* ignore */
+        }
       }
     };
 
-    // Perfect negotiation: negotiationneeded только если мы polite или нет glare
-    pc.onnegotiationneeded = () => {
-      if (pc.signalingState !== 'stable') return;
-      if (this.makingOffer.has(peerId)) return;
-      // Инициатор уже шлёт offer вручную; здесь — только для восстановления/replaceTrack
-      this.safeOffer(peerId).catch(() => {});
-    };
+    // Disabled: auto-offers here caused glare and missing remote video.
+    pc.onnegotiationneeded = () => {};
 
     return pc;
-  }
-
-  async recoverPeer(peerId, hard = false) {
-    const pc = this.pcs.get(peerId);
-    if (!pc) return;
-
-    try {
-      pc.restartIce();
-    } catch (_) {
-      /* ignore */
-    }
-
-    // Односторонний recreate ломает второй peer — шлём сигнал, ждём и поднимаем пару заново через TURN.
-    if (hard && !this.relayTried.has(peerId)) {
-      this.relayTried.add(peerId);
-      this.socket.emit('signal', {
-        to: peerId,
-        data: { type: 'restart' },
-      });
-      await new Promise((r) => setTimeout(r, 400));
-      await this.recreatePeer(peerId, { relayOnly: true, initiator: true });
-      return;
-    }
-
-    this.scheduleRetry(peerId, hard ? 600 : 1500);
-  }
-
-  async recreatePeer(peerId, { relayOnly = false, initiator = true } = {}) {
-    const old = this.pcs.get(peerId);
-    if (old) {
-      try {
-        old.close();
-      } catch (_) {
-        /* ignore */
-      }
-      this.pcs.delete(peerId);
-    }
-    this.pendingIce.set(peerId, []);
-    this.remoteStreams.delete(peerId);
-    this.makingOffer.delete(peerId);
-
-    this.iceConfig = relayOnly
-      ? { ...this.baseIceConfig, iceTransportPolicy: 'relay' }
-      : { ...this.baseIceConfig };
-
-    const pc = this.createPeerConnection(peerId);
-    this.attachLocalMedia(pc, { preferAddTrack: true });
-    if (initiator) {
-      await this.safeOffer(peerId);
-      this.scheduleRetry(peerId, 1200);
-    }
-    // Следующие новые peer'ы снова с policy all
-    this.iceConfig = { ...this.baseIceConfig };
   }
 
   scheduleRetry(peerId, delay = 2500) {
@@ -344,17 +231,8 @@ export class MeshCall {
     const timer = setTimeout(async () => {
       const pc = this.pcs.get(peerId);
       if (!pc) return;
-      const rs = this.remoteStreams.get(peerId);
-      const hasMedia = rs && rs.getTracks().some((t) => t.readyState === 'live');
-      if (pc.connectionState === 'connected' && hasMedia) return;
+      if (pc.connectionState === 'connected' && this.remoteStreams.get(peerId)) return;
       try {
-        if (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed') {
-          try {
-            pc.restartIce();
-          } catch (_) {
-            /* ignore */
-          }
-        }
         await this.safeOffer(peerId);
       } catch (_) {
         /* ignore */
@@ -377,11 +255,8 @@ export class MeshCall {
 
     try {
       this.makingOffer.add(peerId);
-      this.attachLocalMedia(pc, { preferAddTrack: true });
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-      });
+      this.attachLocalMedia(pc);
+      const offer = await pc.createOffer();
       if (pc.signalingState !== 'stable') return;
       await pc.setLocalDescription(offer);
       this.socket.emit('signal', {
@@ -415,11 +290,6 @@ export class MeshCall {
 
   async handleSignal(from, data) {
     try {
-      if (data.type === 'restart') {
-        this.relayTried.add(from);
-        await this.recreatePeer(from, { relayOnly: true, initiator: false });
-        return;
-      }
       if (data.type === 'sdp' && data.sdp) {
         await this.handleSdp(from, data.sdp);
       } else if (data.type === 'ice' && data.candidate) {
@@ -433,15 +303,16 @@ export class MeshCall {
 
   async handleSdp(from, description) {
     let pc = this.pcs.get(from);
-    const polite = this.isPolite(from);
 
     const offerCollision =
       description.type === 'offer' &&
-      !!pc &&
+      pc &&
       (this.makingOffer.has(from) || pc.signalingState !== 'stable');
 
+    const weAreInitiator =
+      this.makingOffer.has(from) || (pc && pc.signalingState === 'have-local-offer');
     if (offerCollision) {
-      if (!polite) {
+      if (weAreInitiator) {
         this.ignoreOffer[from] = true;
         return;
       }
@@ -459,9 +330,10 @@ export class MeshCall {
     this.ignoreOffer[from] = false;
 
     if (description.type === 'offer') {
+      // Answerer path: remote offer first, then local tracks, then answer.
       await pc.setRemoteDescription(description);
       await this.flushIce(from);
-      this.attachLocalMedia(pc, { preferAddTrack: false });
+      this.attachLocalMedia(pc);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       this.socket.emit('signal', {
@@ -471,19 +343,13 @@ export class MeshCall {
           sdp: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
         },
       });
-      this.scheduleRetry(from, 3000);
     } else {
-      if (pc.signalingState === 'stable' && description.type === 'answer') {
-        // Late/duplicate answer — игнор
-        return;
-      }
       await pc.setRemoteDescription(description);
       await this.flushIce(from);
     }
   }
 
   async handleIce(from, candidate) {
-    if (this.ignoreOffer[from]) return;
     const pc = this.pcs.get(from);
     if (!pc || !pc.remoteDescription) {
       const q = this.pendingIce.get(from) || [];
@@ -513,7 +379,6 @@ export class MeshCall {
     const videoTrack = this.localStream.getVideoTracks()[0] || null;
 
     for (const pc of this.pcs.values()) {
-      this.attachLocalMedia(pc, { preferAddTrack: true });
       const audioSender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
       const videoSender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
 
@@ -571,10 +436,6 @@ export class MeshCall {
     return camTrack;
   }
 
-  getPeerConnectionState(peerId) {
-    return this.pcs.get(peerId)?.connectionState || 'new';
-  }
-
   removePeer(peerId) {
     this.clearRetry(peerId);
     const pc = this.pcs.get(peerId);
@@ -584,7 +445,6 @@ export class MeshCall {
     }
     this.pendingIce.delete(peerId);
     this.remoteStreams.delete(peerId);
-    this.relayTried.delete(peerId);
     this.onPeerLeft(peerId);
   }
 

@@ -48,7 +48,6 @@ const state = {
   room: null,
   peers: new Map(),
   streams: new Map(),
-  peerStates: new Map(),
   audioEnabled: true,
   videoEnabled: true,
   screenSharing: false,
@@ -277,7 +276,6 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
     }));
     state.peers.clear();
     state.streams.clear();
-    state.peerStates.clear();
     for (const p of res.peers || []) state.peers.set(p.id, p);
     for (const p of res.room.participants || []) {
       if (p.id !== state.self.id) state.peers.set(p.id, p);
@@ -303,11 +301,6 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
         },
         onPeerLeft: (peerId) => {
           state.streams.delete(peerId);
-          state.peerStates.delete(peerId);
-          renderVideos();
-        },
-        onPeerState: (peerId, connState) => {
-          state.peerStates.set(peerId, connState);
           renderVideos();
         },
         onError: (m) => console.warn(m),
@@ -462,73 +455,33 @@ function updateRoomHeader() {
 }
 
 /**
- * Safari/iPad/Android часто блокируют autoplay чужого видео со звуком.
- * Для remote: сначала muted → play → unmute. Для local: всегда muted.
+ * Safari/iPad часто блокирует autoplay чужого видео со звуком.
+ * Сначала play(), при отказе — временно mute → play → unmute.
  */
 function ensureVideoPlaying(video, { remote = false } = {}) {
   const tryPlay = () => {
-    if (remote && !video.muted) {
-      // Сначала гарантируем старт без звука (политика autoplay)
-      video.muted = true;
-    }
     const p = video.play();
-    if (!p || !p.then) {
-      if (remote) unmuteRemoteSoon(video);
-      return;
-    }
-    p.then(() => {
-      if (remote) unmuteRemoteSoon(video);
-    }).catch(() => {
+    if (!p || !p.then) return;
+    p.catch(() => {
       if (!remote) return;
+      const wasMuted = video.muted;
       video.muted = true;
       video.play()
-        .then(() => unmuteRemoteSoon(video))
+        .then(() => {
+          // После успешного старта пробуем включить звук
+          setTimeout(() => {
+            video.muted = wasMuted;
+            video.play().catch(() => {
+              video.muted = true;
+            });
+          }, 300);
+        })
         .catch(() => {});
     });
   };
   tryPlay();
   video.addEventListener('loadedmetadata', tryPlay, { once: true });
   video.addEventListener('canplay', tryPlay, { once: true });
-}
-
-function unmuteRemoteSoon(video) {
-  setTimeout(() => {
-    if (!video.isConnected) return;
-    // Не включаем звук своему превью
-    if (video.closest('.tile.self')) return;
-    video.muted = false;
-    video.play().catch(() => {
-      video.muted = true;
-    });
-  }, 250);
-}
-
-function streamHasLiveVideo(stream) {
-  return Boolean(
-    stream &&
-      stream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled !== false)
-  );
-}
-
-function peerStatusLabel(entry) {
-  if (entry.self) {
-    if (!streamHasLiveVideo(entry.stream) && !entry.videoEnabled) return 'Камера выкл';
-    if (!streamHasLiveVideo(entry.stream)) return 'Нет видео';
-    return '';
-  }
-  const conn = entry.connState || 'new';
-  const hasVideo = streamHasLiveVideo(entry.stream);
-  const hasAudio = Boolean(
-    entry.stream && entry.stream.getAudioTracks().some((t) => t.readyState === 'live')
-  );
-  if (hasVideo) return '';
-  if (conn === 'failed' || conn === 'disconnected') return 'Нет связи';
-  if (conn === 'connected' || conn === 'completed') {
-    if (hasAudio) return entry.videoEnabled === false ? 'Камера выкл' : 'Нет видео';
-    return 'Нет медиа';
-  }
-  if (conn === 'connecting' || conn === 'checking' || conn === 'new') return 'Подключение…';
-  return 'Подключение…';
 }
 
 function renderVideos() {
@@ -546,7 +499,6 @@ function renderVideos() {
     screenSharing: state.screenSharing,
     handRaised: state.handRaised,
     role: state.self.role,
-    connState: 'connected',
   });
 
   for (const p of state.peers.values()) {
@@ -560,7 +512,6 @@ function renderVideos() {
       screenSharing: p.screenSharing,
       handRaised: p.handRaised,
       role: p.role,
-      connState: state.peerStates.get(p.id) || state.call?.getPeerConnectionState?.(p.id) || 'new',
     });
   }
 
@@ -575,7 +526,6 @@ function renderVideos() {
   for (const e of entries) {
     let tile = [...grid.querySelectorAll('.tile')].find((t) => t.dataset.id === e.id);
     let video;
-    let placeholder;
     if (!tile) {
       tile = document.createElement('div');
       tile.dataset.id = e.id;
@@ -585,30 +535,20 @@ function renderVideos() {
       video.setAttribute('playsinline', 'true');
       video.setAttribute('webkit-playsinline', 'true');
       video.setAttribute('autoplay', 'true');
-      placeholder = document.createElement('div');
-      placeholder.className = 'tile-placeholder';
       const meta = document.createElement('div');
       meta.className = 'tile-meta';
       tile.appendChild(video);
-      tile.appendChild(placeholder);
       tile.appendChild(meta);
       grid.appendChild(tile);
     } else {
       video = tile.querySelector('video');
-      placeholder = tile.querySelector('.tile-placeholder');
-      if (!placeholder) {
-        placeholder = document.createElement('div');
-        placeholder.className = 'tile-placeholder';
-        tile.insertBefore(placeholder, tile.querySelector('.tile-meta'));
-      }
     }
 
     tile.className = 'tile' + (e.self ? ' self' : '') + (e.screenSharing ? ' screen-share' : '');
-    // Своё — всегда muted (без эха).
-    if (e.self) {
-      video.muted = true;
-      video.setAttribute('muted', 'true');
-    }
+    // Своё — всегда muted (без эха). Чужое — со звуком, но с fallback для Safari.
+    video.muted = Boolean(e.self);
+    if (e.self) video.setAttribute('muted', 'true');
+    else video.removeAttribute('muted');
 
     if (e.stream && video.srcObject !== e.stream) {
       video.srcObject = e.stream;
@@ -616,12 +556,6 @@ function renderVideos() {
     } else if (e.stream) {
       ensureVideoPlaying(video, { remote: !e.self });
     }
-
-    const status = peerStatusLabel(e);
-    const showPlaceholder = Boolean(status);
-    tile.classList.toggle('no-media', showPlaceholder);
-    placeholder.textContent = status;
-    placeholder.classList.toggle('hidden', !showPlaceholder);
 
     const meta = tile.querySelector('.tile-meta');
     meta.innerHTML = `
@@ -1164,7 +1098,6 @@ function leaveRoom(confirmLeave) {
   state.call = null;
   state.peers.clear();
   state.streams.clear();
-  state.peerStates.clear();
   state.room = null;
   state.self = null;
   state.socket?.disconnect();
