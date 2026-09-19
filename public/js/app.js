@@ -1,4 +1,5 @@
 import { MeshCall, getMediaSafe } from './webrtc.js';
+import { SocketMediaRelay } from './relay.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -44,10 +45,12 @@ async function showPhoneHint() {
 const state = {
   socket: null,
   call: null,
+  relay: null,
   self: null,
   room: null,
   peers: new Map(),
   streams: new Map(),
+  webrtcPeers: new Set(),
   audioEnabled: true,
   videoEnabled: true,
   screenSharing: false,
@@ -291,22 +294,44 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
 
     try {
       state.call?.destroy();
+      state.relay?.destroy();
+      state.webrtcPeers.clear();
+
       state.call = new MeshCall({
         socket: state.socket,
         selfId: state.self.id,
         iceConfig,
         onRemoteStream: (peerId, stream) => {
+          state.webrtcPeers.add(peerId);
           state.streams.set(peerId, stream);
           renderVideos();
         },
         onPeerLeft: (peerId) => {
-          state.streams.delete(peerId);
+          state.webrtcPeers.delete(peerId);
+          state.relay?.removePeer(peerId);
+          if (!state.streams.has(peerId)) renderVideos();
+          else {
+            state.streams.delete(peerId);
+            renderVideos();
+          }
+        },
+        onError: (m) => console.warn(m),
+      });
+
+      // Запасной канал через Socket.IO — чужое видео между разными сетями без TURN
+      state.relay = new SocketMediaRelay({
+        socket: state.socket,
+        selfId: state.self.id,
+        onRemoteStream: (peerId, stream) => {
+          if (state.webrtcPeers.has(peerId)) return;
+          state.streams.set(peerId, stream);
           renderVideos();
         },
         onError: (m) => console.warn(m),
       });
 
       state.call.setLocalStream(localStream || new MediaStream());
+      state.relay.setLocalStream(localStream || null);
       state.audioEnabled = Boolean(localStream?.getAudioTracks().some((t) => t.enabled !== false && t.readyState !== 'ended'));
       state.videoEnabled = Boolean(localStream?.getVideoTracks().some((t) => t.enabled !== false && t.readyState !== 'ended'));
 
@@ -320,6 +345,8 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
       for (const peer of state.peers.values()) {
         await state.call.connectToPeer(peer.id, { initiator: true });
       }
+
+      state.relay.start();
 
       emitMediaState();
       history.replaceState({}, '', `/?room=${encodeURIComponent(state.room.id)}`);
@@ -346,7 +373,10 @@ function wireSocket() {
 
   s.on('participant:left', (payload) => {
     state.peers.delete(payload.id);
+    state.webrtcPeers.delete(payload.id);
     state.call?.removePeer(payload.id);
+    state.relay?.removePeer(payload.id);
+    state.streams.delete(payload.id);
     renderPeople();
     updateChatTargets();
     renderVideos();
@@ -442,8 +472,8 @@ function emitMediaState() {
 }
 
 async function applyFreshLocalStream(stream) {
-  if (!state.call) return;
-  await state.call.replaceLocalTracks(stream);
+  if (state.call) await state.call.replaceLocalTracks(stream);
+  state.relay?.setLocalStream(stream || null);
 }
 
 function updateRoomHeader() {
@@ -1096,8 +1126,11 @@ function leaveRoom(confirmLeave) {
   if (state.recording) stopRecording();
   state.call?.destroy();
   state.call = null;
+  state.relay?.destroy();
+  state.relay = null;
   state.peers.clear();
   state.streams.clear();
+  state.webrtcPeers.clear();
   state.room = null;
   state.self = null;
   state.socket?.disconnect();

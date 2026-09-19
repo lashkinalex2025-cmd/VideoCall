@@ -810,6 +810,19 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Запасной путь: видео/звук через Socket.IO, если WebRTC между сетями не поднялся
+  socket.on('relay:video', (data) => {
+    const ctx = findParticipantBySocket(socket.id);
+    if (!ctx || data == null) return;
+    socket.to(ctx.room.id).emit('relay:video', { from: ctx.participant.id, data });
+  });
+
+  socket.on('relay:audio', (data) => {
+    const ctx = findParticipantBySocket(socket.id);
+    if (!ctx || data == null) return;
+    socket.to(ctx.room.id).emit('relay:audio', { from: ctx.participant.id, data });
+  });
+
   socket.on('media:state', (state) => {
     const ctx = findParticipantBySocket(socket.id);
     if (!ctx) return;

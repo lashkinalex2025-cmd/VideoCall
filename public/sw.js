@@ -1,4 +1,4 @@
-const CACHE = 'videocall-v7';
+const CACHE = 'videocall-v9';
 const ASSETS = [
   '/',
   '/index.html',
@@ -7,6 +7,7 @@ const ASSETS = [
   '/js/admin.js',
   '/js/cabinet.js',
   '/js/webrtc.js',
+  '/js/relay.js',
   '/manifest.json',
   '/icons/icon.svg',
   '/icons/icon-192.png',
