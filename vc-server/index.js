@@ -20,6 +20,11 @@ const {
 const JWT_SECRET = process.env.VC_JWT_SECRET || process.env.JWT_SECRET || 'videoconf-prod-secret-change-me';
 const TOKEN_EXPIRES = '7d';
 
+const roomParticipants = new Map();
+const recordingFlags = new Map();
+/** @type {import('socket.io').Server | null} */
+let ioRef = null;
+
 function signToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_EXPIRES });
 }
@@ -55,46 +60,36 @@ function resolveRole(room, authUserId) {
   return 'guest';
 }
 
-/**
- * @param {import('http').Server} httpServer
- */
-function attachVideoConf(httpServer, app) {
-  ensureDataDir();
-
-  const router = express.Router();
-  const roomParticipants = new Map();
-  const recordingFlags = new Map();
-
-  function getRoomMap(roomId) {
-    let m = roomParticipants.get(roomId);
-    if (!m) {
-      m = new Map();
-      roomParticipants.set(roomId, m);
-    }
-    return m;
+function getRoomMap(roomId) {
+  let m = roomParticipants.get(roomId);
+  if (!m) {
+    m = new Map();
+    roomParticipants.set(roomId, m);
   }
+  return m;
+}
 
-  function participantsList(roomId) {
-    return Array.from(getRoomMap(roomId).values()).map((p) => ({
-      id: p.id,
-      name: p.name,
-      role: p.role,
-      audio: p.audio,
-      video: p.video,
-    }));
-  }
+function participantsList(roomId) {
+  return Array.from(getRoomMap(roomId).values()).map((p) => ({
+    id: p.id,
+    name: p.name,
+    role: p.role,
+    audio: p.audio,
+    video: p.video,
+  }));
+}
 
-  const io = new Server(httpServer, {
-    path: '/vc-socket.io',
-    cors: { origin: '*', methods: ['GET', 'POST'] },
+function broadcastRoomState(roomId) {
+  if (!ioRef) return;
+  ioRef.to(roomId).emit('room-state', {
+    participants: participantsList(roomId),
+    recording: recordingFlags.get(roomId) || false,
   });
+}
 
-  function broadcastRoomState(roomId) {
-    io.to(roomId).emit('room-state', {
-      participants: participantsList(roomId),
-      recording: recordingFlags.get(roomId) || false,
-    });
-  }
+function createRouter() {
+  ensureDataDir();
+  const router = express.Router();
 
   router.get('/healthz', (_req, res) => {
     res.json({ ok: true, livekit: false, service: 'videoconf-vc' });
@@ -248,7 +243,7 @@ function attachVideoConf(httpServer, app) {
       if (room.ownerId !== req.auth.sub) return res.status(403).json({ error: 'Only owner can end' });
       room.endedAt = new Date().toISOString();
       saveDb(db);
-      io.to(room.id).emit('room-ended', { roomId: room.id, endedAt: room.endedAt });
+      if (ioRef) ioRef.to(room.id).emit('room-ended', { roomId: room.id, endedAt: room.endedAt });
       res.json({ ok: true, room: publicRoom(room) });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -281,23 +276,36 @@ function attachVideoConf(httpServer, app) {
       };
       db.messages.push(message);
       saveDb(db);
-      io.to(room.id).emit('chat-message', message);
+      if (ioRef) ioRef.to(room.id).emit('chat-message', message);
       res.status(201).json(message);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // Static UI under /vc/
   const webDir = path.join(__dirname, '..', 'public', 'vc');
   router.use(express.static(webDir));
-  router.get(['/', '/r/:code', '/room/:code', '/login'], (_req, res) => {
+  router.get(['/', '/index.html', '/r/:code', '/room/:code', '/login'], (_req, res) => {
     res.sendFile(path.join(webDir, 'index.html'));
   });
 
-  app.use('/vc', router);
+  return router;
+}
 
-  io.on('connection', (socket) => {
+/** Mount HTTP routes early (before SPA catch-all). */
+function mountRoutes(app) {
+  app.use('/vc', createRouter());
+  console.log('VideoConf HTTP routes mounted at /vc');
+}
+
+/** Attach Socket.IO after http.Server exists. */
+function attachSockets(httpServer) {
+  ioRef = new Server(httpServer, {
+    path: '/vc-socket.io',
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+  });
+
+  ioRef.on('connection', (socket) => {
     const data = socket.data;
 
     socket.on('join-room', (payload = {}) => {
@@ -384,14 +392,14 @@ function attachVideoConf(httpServer, app) {
       };
       db.messages.push(message);
       saveDb(db);
-      io.to(room.id).emit('chat-message', message);
+      ioRef.to(room.id).emit('chat-message', message);
     });
 
     socket.on('signal', (payload = {}) => {
       if (!data.roomId || !payload.to) return;
       const target = getRoomMap(data.roomId).get(payload.to);
       if (!target) return;
-      io.to(target.socketId).emit('signal', {
+      ioRef.to(target.socketId).emit('signal', {
         type: payload.type,
         to: payload.to,
         from: payload.from || data.participantId,
@@ -407,28 +415,33 @@ function attachVideoConf(httpServer, app) {
       if (!self || (self.role !== 'host' && self.role !== 'moderator')) return;
       const next = Boolean(payload.active);
       recordingFlags.set(data.roomId, next);
-      io.to(data.roomId).emit('recording-flag', { active: next, recording: next });
+      ioRef.to(data.roomId).emit('recording-flag', { active: next, recording: next });
       broadcastRoomState(data.roomId);
     });
 
     socket.on('disconnect', () => leave(socket));
   });
 
-  function leave(socket) {
-    const data = socket.data;
-    if (!data.roomId || !data.participantId) return;
-    const roomId = data.roomId;
-    const participantId = data.participantId;
-    getRoomMap(roomId).delete(participantId);
-    socket.leave(roomId);
-    socket.to(roomId).emit('peer-left', { id: participantId });
-    broadcastRoomState(roomId);
-    data.roomId = undefined;
-    data.participantId = undefined;
-  }
-
-  console.log('VideoConf mounted at /vc (socket path /vc-socket.io)');
-  return { io, router };
+  console.log('VideoConf sockets attached at /vc-socket.io');
 }
 
-module.exports = { attachVideoConf };
+function leave(socket) {
+  const data = socket.data;
+  if (!data.roomId || !data.participantId) return;
+  const roomId = data.roomId;
+  const participantId = data.participantId;
+  getRoomMap(roomId).delete(participantId);
+  socket.leave(roomId);
+  socket.to(roomId).emit('peer-left', { id: participantId });
+  broadcastRoomState(roomId);
+  data.roomId = undefined;
+  data.participantId = undefined;
+}
+
+/** Backward-compatible helper */
+function attachVideoConf(httpServer, app) {
+  mountRoutes(app);
+  attachSockets(httpServer);
+}
+
+module.exports = { mountRoutes, attachSockets, attachVideoConf };

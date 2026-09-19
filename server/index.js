@@ -711,6 +711,13 @@ async function summarizeWithSpaceXAI(apiKey, transcript, roomName) {
   return data.choices?.[0]?.message?.content?.trim() || '';
 }
 
+// Mount VideoConf HTTP API/UI before SPA catch-all
+try {
+  require('../vc-server').mountRoutes(app);
+} catch (err) {
+  console.warn('VideoConf /vc routes failed:', err.message);
+}
+
 app.get('*', (req, res, next) => {
   if (
     req.path.startsWith('/api') ||
@@ -1102,10 +1109,9 @@ async function main() {
   const httpServer = http.createServer(app);
   io.attach(httpServer);
   try {
-    const { attachVideoConf } = require('../vc-server');
-    attachVideoConf(httpServer, app);
+    require('../vc-server').attachSockets(httpServer);
   } catch (err) {
-    console.warn('VideoConf /vc mount failed:', err.message);
+    console.warn('VideoConf sockets failed:', err.message);
   }
   await new Promise((resolve) => httpServer.listen(PORT, HOST, resolve));
 
