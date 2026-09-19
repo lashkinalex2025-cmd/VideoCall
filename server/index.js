@@ -712,7 +712,14 @@ async function summarizeWithSpaceXAI(apiKey, transcript, roomName) {
 }
 
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next();
+  if (
+    req.path.startsWith('/api') ||
+    req.path.startsWith('/socket.io') ||
+    req.path.startsWith('/vc') ||
+    req.path.startsWith('/vc-socket.io')
+  ) {
+    return next();
+  }
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
@@ -1094,6 +1101,12 @@ async function startTunnel(port) {
 async function main() {
   const httpServer = http.createServer(app);
   io.attach(httpServer);
+  try {
+    const { attachVideoConf } = require('../vc-server');
+    attachVideoConf(httpServer, app);
+  } catch (err) {
+    console.warn('VideoConf /vc mount failed:', err.message);
+  }
   await new Promise((resolve) => httpServer.listen(PORT, HOST, resolve));
 
   // Render / Railway / Fly дают свой HTTPS — локальный сертификат не нужен

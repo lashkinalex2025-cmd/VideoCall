@@ -10,3 +10,7 @@ recordings/
 certs/
 data/
 key.txt
+
+vc-server/data/db.json
+vc-server/data/db.json.tmp
+
