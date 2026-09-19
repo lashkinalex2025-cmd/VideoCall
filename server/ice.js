@@ -1,9 +1,12 @@
 const crypto = require('crypto');
 
 /**
- * Open Relay (Metered) static-auth TURN — работает между разными сетями / мобильным интернетом.
- * Формат coturn REST: username = expiry, credential = base64(hmac_sha1(secret, username))
+ * Open Relay (Metered) — бесплатный TURN для разных сетей / мобильного интернета.
  * Docs: https://www.metered.ca/tools/openrelay/
+ *
+ * 1) Static-auth (coturn REST): username = expiry[:id], credential = HMAC-SHA1(secret, username)
+ * 2) Legacy shared user/pass (ещё встречается в старых клиентах)
+ * 3) Опционально: METERED_TURN_API_KEY + METERED_APP_NAME → персональные creds
  */
 const OPENRELAY_SECRET =
   process.env.TURN_SECRET || process.env.OPENRELAY_SECRET || 'openrelayprojectsecret';
@@ -15,25 +18,31 @@ function turnCredential(username) {
 
 function buildOpenRelayIceServers() {
   const expiry = Math.floor(Date.now() / 1000) + TURN_TTL_SEC;
-  // coturn REST: username = "<expiry>:<id>", password = HMAC-SHA1(secret, username)
-  const username = `${expiry}:videocall`;
-  const credential = turnCredential(username);
-  const auth = { username, credential };
-
-  // Также короткий формат username = expiry (некоторые конфиги Open Relay)
+  const usernameLong = `${expiry}:videocall`;
+  const authLong = { username: usernameLong, credential: turnCredential(usernameLong) };
   const usernameShort = String(expiry);
   const authShort = { username: usernameShort, credential: turnCredential(usernameShort) };
+  const legacy = { username: 'openrelayproject', credential: 'openrelayproject' };
 
   return [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.relay.metered.ca:80' },
-    { urls: 'turn:staticauth.openrelay.metered.ca:80', ...auth },
-    { urls: 'turn:staticauth.openrelay.metered.ca:80?transport=tcp', ...auth },
-    { urls: 'turn:staticauth.openrelay.metered.ca:443', ...auth },
-    { urls: 'turns:staticauth.openrelay.metered.ca:443?transport=tcp', ...auth },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+
+    // Static-auth Open Relay (основной путь для cross-NAT)
+    { urls: 'turn:staticauth.openrelay.metered.ca:80', ...authLong },
+    { urls: 'turn:staticauth.openrelay.metered.ca:80?transport=tcp', ...authLong },
+    { urls: 'turn:staticauth.openrelay.metered.ca:443', ...authLong },
+    { urls: 'turns:staticauth.openrelay.metered.ca:443?transport=tcp', ...authLong },
     { urls: 'turn:staticauth.openrelay.metered.ca:80', ...authShort },
     { urls: 'turn:staticauth.openrelay.metered.ca:443?transport=tcp', ...authShort },
+
+    // Legacy shared credentials + hostname без staticauth
+    { urls: 'turn:openrelay.metered.ca:80', ...legacy },
+    { urls: 'turn:openrelay.metered.ca:443', ...legacy },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', ...legacy },
+    { urls: 'turns:openrelay.metered.ca:443?transport=tcp', ...legacy },
   ];
 }
 
@@ -53,9 +62,15 @@ async function getIceServers() {
     const metered = await fetchMeteredIceServers();
     if (metered?.length) {
       return {
-        iceServers: metered,
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          ...metered,
+        ],
         iceTransportPolicy: 'all',
-        iceCandidatePoolSize: 8,
+        iceCandidatePoolSize: 4,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require',
         source: 'metered-api',
       };
     }
@@ -66,7 +81,7 @@ async function getIceServers() {
   return {
     iceServers: buildOpenRelayIceServers(),
     iceTransportPolicy: 'all',
-    iceCandidatePoolSize: 8,
+    iceCandidatePoolSize: 4,
     bundlePolicy: 'max-bundle',
     rtcpMuxPolicy: 'require',
     source: 'openrelay-staticauth',
