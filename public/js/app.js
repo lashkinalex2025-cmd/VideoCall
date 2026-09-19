@@ -1,5 +1,5 @@
-import { MeshCall, getMediaSafe } from './webrtc.js';
-import { SocketMediaRelay } from './relay.js';
+import { MeshCall, getMediaSafe } from './webrtc.js?v=11';
+import { SocketMediaRelay } from './relay.js?v=11';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -50,6 +50,7 @@ const state = {
   room: null,
   peers: new Map(),
   streams: new Map(),
+  relayFrames: new Map(),
   webrtcPeers: new Set(),
   audioEnabled: true,
   videoEnabled: true,
@@ -279,6 +280,7 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
     }));
     state.peers.clear();
     state.streams.clear();
+    state.relayFrames.clear();
     for (const p of res.peers || []) state.peers.set(p.id, p);
     for (const p of res.room.participants || []) {
       if (p.id !== state.self.id) state.peers.set(p.id, p);
@@ -297,39 +299,33 @@ async function enterRoom({ roomId, name, password, localStream = null }) {
       state.relay?.destroy();
       state.webrtcPeers.clear();
 
-      // Relay — основной путь чужого видео между разными сетями (без TURN-ключей).
+      // Relay — основной путь чужого видео между разными сетями (JPEG → <img>).
       state.relay = new SocketMediaRelay({
         socket: state.socket,
         selfId: state.self.id,
-        onRemoteStream: (peerId, stream) => {
-          state.streams.set(peerId, stream);
+        onRemoteFrame: (peerId, objectUrl) => {
+          state.relayFrames.set(peerId, objectUrl);
           renderVideos();
         },
         onError: (m) => console.warn(m),
       });
 
-      // WebRTC оставляем как доп. попытку в одной LAN; UI берёт relay-поток.
+      // WebRTC — доп. попытка в одной LAN (не мешает relay-картинке).
       state.call = new MeshCall({
         socket: state.socket,
         selfId: state.self.id,
         iceConfig,
         onRemoteStream: (peerId, stream) => {
-          const liveVideo = stream
-            ?.getVideoTracks()
-            ?.some((t) => t.readyState === 'live' && t.muted === false);
-          if (!liveVideo) return;
           state.webrtcPeers.add(peerId);
-          // Не перебиваем уже идущий relay, если WebRTC ещё «пустой».
-          const cur = state.streams.get(peerId);
-          const relayWorking = cur && cur !== stream;
-          if (relayWorking) return;
           state.streams.set(peerId, stream);
-          renderVideos();
+          // Если уже есть relay-кадры — оставляем их на экране.
+          if (!state.relayFrames.has(peerId)) renderVideos();
         },
         onPeerLeft: (peerId) => {
           state.webrtcPeers.delete(peerId);
           state.relay?.removePeer(peerId);
           state.streams.delete(peerId);
+          state.relayFrames.delete(peerId);
           renderVideos();
         },
         onError: (m) => console.warn(m),
@@ -386,6 +382,7 @@ function wireSocket() {
     state.call?.removePeer(payload.id);
     state.relay?.removePeer(payload.id);
     state.streams.delete(payload.id);
+    state.relayFrames.delete(payload.id);
     renderPeople();
     updateChatTargets();
     renderVideos();
@@ -556,6 +553,7 @@ function renderVideos() {
       id: p.id,
       name: p.name,
       stream: state.streams.get(p.id),
+      frameUrl: state.relayFrames.get(p.id) || '',
       self: false,
       audioEnabled: p.audioEnabled !== false,
       videoEnabled: p.videoEnabled !== false,
@@ -576,6 +574,7 @@ function renderVideos() {
   for (const e of entries) {
     let tile = [...grid.querySelectorAll('.tile')].find((t) => t.dataset.id === e.id);
     let video;
+    let img;
     if (!tile) {
       tile = document.createElement('div');
       tile.dataset.id = e.id;
@@ -585,26 +584,50 @@ function renderVideos() {
       video.setAttribute('playsinline', 'true');
       video.setAttribute('webkit-playsinline', 'true');
       video.setAttribute('autoplay', 'true');
+      img = document.createElement('img');
+      img.className = 'tile-relay';
+      img.alt = '';
+      img.decoding = 'async';
       const meta = document.createElement('div');
       meta.className = 'tile-meta';
       tile.appendChild(video);
+      tile.appendChild(img);
       tile.appendChild(meta);
       grid.appendChild(tile);
     } else {
       video = tile.querySelector('video');
+      img = tile.querySelector('img.tile-relay');
+      if (!img) {
+        img = document.createElement('img');
+        img.className = 'tile-relay';
+        img.alt = '';
+        img.decoding = 'async';
+        tile.insertBefore(img, tile.querySelector('.tile-meta'));
+      }
     }
 
     tile.className = 'tile' + (e.self ? ' self' : '') + (e.screenSharing ? ' screen-share' : '');
-    // Своё — всегда muted (без эха). Чужое — со звуком, но с fallback для Safari.
     video.muted = Boolean(e.self);
     if (e.self) video.setAttribute('muted', 'true');
     else video.removeAttribute('muted');
 
-    if (e.stream && video.srcObject !== e.stream) {
-      video.srcObject = e.stream;
-      ensureVideoPlaying(video, { remote: !e.self });
-    } else if (e.stream) {
-      ensureVideoPlaying(video, { remote: !e.self });
+    // Чужое: предпочитаем JPEG-relay (img). Своё / WebRTC — video.
+    const useRelayImg = !e.self && Boolean(e.frameUrl);
+    tile.classList.toggle('relay-mode', useRelayImg);
+    if (useRelayImg) {
+      if (img.getAttribute('src') !== e.frameUrl) img.src = e.frameUrl;
+      img.style.display = 'block';
+      video.style.display = 'none';
+      if (video.srcObject) video.srcObject = null;
+    } else {
+      img.style.display = 'none';
+      video.style.display = 'block';
+      if (e.stream && video.srcObject !== e.stream) {
+        video.srcObject = e.stream;
+        ensureVideoPlaying(video, { remote: !e.self });
+      } else if (e.stream) {
+        ensureVideoPlaying(video, { remote: !e.self });
+      }
     }
 
     const meta = tile.querySelector('.tile-meta');
@@ -614,7 +637,7 @@ function renderVideos() {
         ${e.handRaised ? '<span class="badge live">✋</span>' : ''}
         ${e.screenSharing ? '<span class="badge live">экран</span>' : ''}
         <span class="badge ${e.audioEnabled ? '' : 'off'}">${e.audioEnabled ? 'mic' : 'mic off'}</span>
-        <span class="badge ${e.videoEnabled || e.screenSharing ? '' : 'off'}">${e.videoEnabled || e.screenSharing ? 'cam' : 'cam off'}</span>
+        <span class="badge ${e.videoEnabled || e.screenSharing || e.frameUrl ? '' : 'off'}">${e.videoEnabled || e.screenSharing || e.frameUrl ? 'cam' : 'cam off'}</span>
       </div>`;
   }
   updateRoomHeader();
@@ -1159,6 +1182,7 @@ function leaveRoom(confirmLeave) {
   state.relay = null;
   state.peers.clear();
   state.streams.clear();
+  state.relayFrames.clear();
   state.webrtcPeers.clear();
   state.room = null;
   state.self = null;
@@ -1171,7 +1195,19 @@ function leaveRoom(confirmLeave) {
 
 function initPWA() {
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch((err) => console.warn('SW', err));
+    // Сброс старого кэша, иначе телефон может держать прошлую версию без relay
+    navigator.serviceWorker.getRegistrations().then(async (regs) => {
+      for (const reg of regs) {
+        try {
+          await reg.unregister();
+        } catch (_) {}
+      }
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      } catch (_) {}
+      return navigator.serviceWorker.register('/sw.js?v=11');
+    }).catch((err) => console.warn('SW', err));
   }
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();

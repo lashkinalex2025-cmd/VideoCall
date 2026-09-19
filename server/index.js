@@ -43,6 +43,16 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
     if (filePath.endsWith('.js')) {
       res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
     }
+    // Чтобы телефон/ПК не держали старый JS без чужого видео
+    if (
+      filePath.endsWith('.js') ||
+      filePath.endsWith('.css') ||
+      filePath.endsWith('.html') ||
+      filePath.endsWith('sw.js')
+    ) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+    }
   },
 }));
 

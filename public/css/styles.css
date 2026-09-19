@@ -407,11 +407,15 @@ button { cursor: pointer; }
   aspect-ratio: 16/10;
   min-height: 160px;
 }
-.tile video {
+.tile video,
+.tile img.tile-relay {
   width: 100%; height: 100%; object-fit: cover; background: #000;
+  display: block;
 }
+.tile img.tile-relay { position: absolute; inset: 0; border: 0; }
 .tile.self video { transform: scaleX(-1); }
 .tile.self.screen-share video { transform: none; }
+.tile.relay-mode video { visibility: hidden; }
 .tile-meta {
   position: absolute; left: 0; right: 0; bottom: 0;
   display: flex; justify-content: space-between; align-items: center;

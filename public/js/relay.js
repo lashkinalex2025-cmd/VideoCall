@@ -1,12 +1,12 @@
 /**
- * Чужое видео/звук через Socket.IO (тот же канал, что чат).
- * Работает между разными сетями без внешнего TURN.
+ * Чужое видео/звук через Socket.IO.
+ * Видео = JPEG-кадры → <img> (так надёжнее, чем canvas.captureStream на телефонах).
  */
 
-const VIDEO_W = 480;
-const VIDEO_H = 360;
-const VIDEO_FPS = 8;
-const VIDEO_QUALITY = 0.55;
+const VIDEO_W = 320;
+const VIDEO_H = 240;
+const VIDEO_FPS = 6;
+const VIDEO_QUALITY = 0.5;
 const AUDIO_FRAME = 4096;
 const AUDIO_RATE = 16000;
 
@@ -31,10 +31,18 @@ function toArrayBuffer(data) {
 }
 
 export class SocketMediaRelay {
-  constructor({ socket, selfId, onRemoteStream, onError }) {
+  /**
+   * @param {{
+   *  socket: any,
+   *  selfId: string,
+   *  onRemoteFrame: (peerId: string, objectUrl: string) => void,
+   *  onError?: (msg: string) => void
+   * }} opts
+   */
+  constructor({ socket, selfId, onRemoteFrame, onError }) {
     this.socket = socket;
     this.selfId = selfId;
-    this.onRemoteStream = onRemoteStream;
+    this.onRemoteFrame = onRemoteFrame;
     this.onError = onError || (() => {});
     this.localStream = null;
     this.sending = false;
@@ -45,7 +53,9 @@ export class SocketMediaRelay {
     this.audioSource = null;
     this.silentGain = null;
     this.captureVideo = null;
-    this.peers = new Map();
+    this.captureCanvas = null;
+    this.peerAudio = new Map(); // peerId -> { ctx, dest, nextTime }
+    this.peerUrls = new Map(); // peerId -> objectUrl
     this._onVideo = this._onVideo.bind(this);
     this._onAudio = this._onAudio.bind(this);
     this.socket.on('relay:video', this._onVideo);
@@ -63,23 +73,40 @@ export class SocketMediaRelay {
   start() {
     if (this.sending) return;
     this.sending = true;
+    this._ensureCaptureEl();
     this._startVideoLoop();
     this._startAudioLoop().catch((err) => this.onError(err.message || 'relay audio'));
   }
 
-  /** Вызывать из клика в комнате — иначе на телефоне звук может молчать. */
   async resumeAudio() {
     try {
       if (this.audioCtx?.state === 'suspended') await this.audioCtx.resume();
-    } catch (_) {
-      /* ignore */
-    }
-    for (const p of this.peers.values()) {
+    } catch (_) {}
+    for (const p of this.peerAudio.values()) {
       try {
-        if (p.audioCtx?.state === 'suspended') await p.audioCtx.resume();
-      } catch (_) {
-        /* ignore */
-      }
+        if (p.ctx?.state === 'suspended') await p.ctx.resume();
+      } catch (_) {}
+    }
+  }
+
+  ensurePeer(peerId) {
+    // кадр появится при первом JPEG; аудио-граф можно подготовить заранее
+    if (!peerId || peerId === this.selfId) return;
+    this._ensureAudioPeer(peerId);
+  }
+
+  removePeer(peerId) {
+    const a = this.peerAudio.get(peerId);
+    if (a) {
+      try {
+        a.ctx.close();
+      } catch (_) {}
+      this.peerAudio.delete(peerId);
+    }
+    const url = this.peerUrls.get(peerId);
+    if (url) {
+      URL.revokeObjectURL(url);
+      this.peerUrls.delete(peerId);
     }
   }
 
@@ -94,34 +121,28 @@ export class SocketMediaRelay {
       this.audioSource?.disconnect();
       this.silentGain?.disconnect();
       this.audioCtx?.close();
-    } catch (_) {
-      /* ignore */
-    }
+    } catch (_) {}
     this.processor = null;
     this.audioSource = null;
     this.silentGain = null;
     this.audioCtx = null;
-    this.captureVideo = null;
     this.busyFrame = false;
 
-    for (const peerId of [...this.peers.keys()]) this.removePeer(peerId);
-  }
-
-  /** Создать пустой поток заранее — плитка появляется сразу при входе участника. */
-  ensurePeer(peerId) {
-    if (!peerId || peerId === this.selfId) return null;
-    return this._ensurePeer(peerId);
-  }
-
-  removePeer(peerId) {
-    const p = this.peers.get(peerId);
-    if (!p) return;
-    try {
-      p.audioCtx?.close();
-    } catch (_) {
-      /* ignore */
+    if (this.captureVideo) {
+      try {
+        this.captureVideo.srcObject = null;
+        this.captureVideo.remove();
+      } catch (_) {}
+      this.captureVideo = null;
     }
-    this.peers.delete(peerId);
+    if (this.captureCanvas) {
+      try {
+        this.captureCanvas.remove();
+      } catch (_) {}
+      this.captureCanvas = null;
+    }
+
+    for (const id of [...this.peerAudio.keys()]) this.removePeer(id);
   }
 
   destroy() {
@@ -130,72 +151,55 @@ export class SocketMediaRelay {
     this.socket.off('relay:audio', this._onAudio);
   }
 
-  _ensurePeer(peerId) {
-    let p = this.peers.get(peerId);
-    if (p) return p;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = VIDEO_W;
-    canvas.height = VIDEO_H;
-    const ctx = canvas.getContext('2d', { alpha: false });
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, VIDEO_W, VIDEO_H);
-
-    const videoStream = canvas.captureStream(VIDEO_FPS);
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    const audioCtx = new AudioCtx();
-    const audioDest = audioCtx.createMediaStreamDestination();
-    // Держим граф живым (нужно некоторым браузерам)
-    const zero = audioCtx.createGain();
-    zero.gain.value = 0;
-    audioDest.connect(zero);
-    zero.connect(audioCtx.destination);
-
-    const stream = new MediaStream([
-      ...videoStream.getVideoTracks(),
-      ...audioDest.stream.getAudioTracks(),
-    ]);
-
-    p = {
-      canvas,
-      ctx,
-      stream,
-      audioCtx,
-      audioDest,
-      nextTime: audioCtx.currentTime + 0.12,
-      img: new Image(),
-    };
-    this.peers.set(peerId, p);
-    this.onRemoteStream(peerId, stream);
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(() => {});
-    }
-    return p;
-  }
-
-  _startVideoLoop() {
-    const canvas = document.createElement('canvas');
-    canvas.width = VIDEO_W;
-    canvas.height = VIDEO_H;
-    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  _ensureCaptureEl() {
+    if (this.captureVideo) return;
     const video = document.createElement('video');
     video.muted = true;
+    video.defaultMuted = true;
     video.playsInline = true;
     video.setAttribute('playsinline', 'true');
+    video.setAttribute('muted', 'true');
     video.autoplay = true;
+    // ОБЯЗАТЕЛЬНО в DOM — иначе на Android/iOS часто videoWidth=0 и кадры не шлются
+    video.style.cssText =
+      'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-99px;top:-99px;';
+    document.body.appendChild(video);
     this.captureVideo = video;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = VIDEO_W;
+    canvas.height = VIDEO_H;
+    canvas.style.display = 'none';
+    document.body.appendChild(canvas);
+    this.captureCanvas = canvas;
 
     if (this.localStream) {
       video.srcObject = this.localStream;
       video.play().catch(() => {});
     }
+  }
+
+  _startVideoLoop() {
+    const video = this.captureVideo;
+    const canvas = this.captureCanvas;
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
     this.timer = setInterval(() => {
       if (!this.sending || this.busyFrame) return;
+      if (!this.localStream) return;
       const track = this.localStream
-        ?.getVideoTracks()
+        .getVideoTracks()
         .find((t) => t.readyState === 'live' && t.enabled !== false);
-      if (!track || !video.videoWidth) return;
+      if (!track) return;
+
+      if (video.srcObject !== this.localStream) {
+        video.srcObject = this.localStream;
+        video.play().catch(() => {});
+      }
+      if (!video.videoWidth) {
+        video.play().catch(() => {});
+        return;
+      }
 
       ctx.drawImage(video, 0, 0, VIDEO_W, VIDEO_H);
       this.busyFrame = true;
@@ -204,9 +208,9 @@ export class SocketMediaRelay {
           this.busyFrame = false;
           if (!blob || !this.sending) return;
           blob.arrayBuffer().then((buf) => {
-            if (this.sending) this.socket.volatile?.emit
-              ? this.socket.volatile.emit('relay:video', buf)
-              : this.socket.emit('relay:video', buf);
+            if (!this.sending) return;
+            // обычный emit (не volatile) — иначе на слабой сети кадры все отбрасываются
+            this.socket.emit('relay:video', buf);
           });
         },
         'image/jpeg',
@@ -223,9 +227,7 @@ export class SocketMediaRelay {
     if (this.audioCtx.state === 'suspended') {
       try {
         await this.audioCtx.resume();
-      } catch (_) {
-        /* ignore */
-      }
+      } catch (_) {}
     }
     this.audioSource = this.audioCtx.createMediaStreamSource(this.localStream);
     this.processor = this.audioCtx.createScriptProcessor(AUDIO_FRAME, 1, 1);
@@ -244,9 +246,27 @@ export class SocketMediaRelay {
       const input = ev.inputBuffer.getChannelData(0);
       const pcm = downsampleToInt16(input, AUDIO_RATE, this.audioCtx.sampleRate);
       const copy = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
-      if (this.socket.volatile?.emit) this.socket.volatile.emit('relay:audio', copy);
-      else this.socket.emit('relay:audio', copy);
+      this.socket.emit('relay:audio', copy);
     };
+  }
+
+  _ensureAudioPeer(peerId) {
+    let p = this.peerAudio.get(peerId);
+    if (p) return p;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    const dest = ctx.createMediaStreamDestination();
+    const gain = ctx.createGain();
+    gain.gain.value = 1;
+    // Для слышимости подключаем к speakers напрямую
+    const out = ctx.createGain();
+    out.gain.value = 1;
+    // Будем играть BufferSource → out → destination
+    p = { ctx, dest, out, nextTime: ctx.currentTime + 0.1 };
+    out.connect(ctx.destination);
+    this.peerAudio.set(peerId, p);
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    return p;
   }
 
   async _onVideo(payload) {
@@ -264,20 +284,12 @@ export class SocketMediaRelay {
     const buf = toArrayBuffer(data);
     if (!buf || buf.byteLength < 24) return;
 
-    const p = this._ensurePeer(from);
     const blob = new Blob([buf], { type: 'image/jpeg' });
     const url = URL.createObjectURL(blob);
-    const img = p.img;
-    img.onload = () => {
-      try {
-        p.ctx.drawImage(img, 0, 0, VIDEO_W, VIDEO_H);
-      } catch (_) {
-        /* ignore */
-      }
-      URL.revokeObjectURL(url);
-    };
-    img.onerror = () => URL.revokeObjectURL(url);
-    img.src = url;
+    const prev = this.peerUrls.get(from);
+    this.peerUrls.set(from, url);
+    if (prev) URL.revokeObjectURL(prev);
+    this.onRemoteFrame(from, url);
   }
 
   async _onAudio(payload) {
@@ -295,28 +307,24 @@ export class SocketMediaRelay {
     const buf = toArrayBuffer(data);
     if (!buf || buf.byteLength < 2) return;
 
-    const p = this._ensurePeer(from);
-    if (p.audioCtx.state === 'suspended') {
-      p.audioCtx.resume().catch(() => {});
-    }
+    const p = this._ensureAudioPeer(from);
+    if (p.ctx.state === 'suspended') p.ctx.resume().catch(() => {});
 
     const int16 = new Int16Array(buf);
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) {
       float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7fff);
     }
-    const audioBuf = p.audioCtx.createBuffer(1, float32.length, AUDIO_RATE);
+    const audioBuf = p.ctx.createBuffer(1, float32.length, AUDIO_RATE);
     audioBuf.copyToChannel(float32, 0);
-    const src = p.audioCtx.createBufferSource();
+    const src = p.ctx.createBufferSource();
     src.buffer = audioBuf;
-    src.connect(p.audioDest);
-    const now = p.audioCtx.currentTime;
+    src.connect(p.out);
+    const now = p.ctx.currentTime;
     if (p.nextTime < now + 0.04) p.nextTime = now + 0.04;
     try {
       src.start(p.nextTime);
       p.nextTime += audioBuf.duration;
-    } catch (_) {
-      /* ignore */
-    }
+    } catch (_) {}
   }
 }

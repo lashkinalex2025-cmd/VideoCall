@@ -8,11 +8,18 @@ async function main() {
 
   const relayRes = await fetch(base + '/js/relay.js', { cache: 'no-store' });
   const relayText = await relayRes.text();
-  console.log('relay_js', relayRes.status, relayText.includes('SocketMediaRelay'), relayText.includes('resumeAudio'));
+  console.log(
+    'relay_js',
+    relayRes.status,
+    relayText.includes('SocketMediaRelay'),
+    relayText.includes('onRemoteFrame') || relayText.includes('resumeAudio')
+  );
 
   const appText = await fetch(base + '/js/app.js', { cache: 'no-store' }).then((r) => r.text());
-  console.log('app_import', appText.includes("from './relay.js'") || appText.includes('from "./relay.js"'));
+  const hasImport = /from ['\"]\.\/relay\.js(\?[^'\"]*)?['\"]/.test(appText);
+  console.log('app_import', hasImport);
   console.log('app_starts_relay', appText.includes('state.relay.start()'));
+  console.log('app_relay_frames', appText.includes('relayFrames') || appText.includes('onRemoteFrame'));
 
   const swText = await fetch(base + '/sw.js', { cache: 'no-store' }).then((r) => r.text());
   console.log('sw', /videocall-v\d+/.exec(swText)?.[0] || 'none');
@@ -79,9 +86,10 @@ async function main() {
     health.ok &&
     relayRes.status === 200 &&
     relayText.includes('SocketMediaRelay') &&
-    relayText.includes('resumeAudio') &&
-    (appText.includes("from './relay.js'") || appText.includes('from "./relay.js"')) &&
+    (relayText.includes('onRemoteFrame') || relayText.includes('resumeAudio')) &&
+    /from ['\"]\.\/relay\.js(\?[^'\"]*)?['\"]/.test(appText) &&
     appText.includes('state.relay.start()') &&
+    (appText.includes('relayFrames') || appText.includes('onRemoteFrame')) &&
     videoGot.from === joinA.self.id &&
     audioGot.from === joinA.self.id;
 

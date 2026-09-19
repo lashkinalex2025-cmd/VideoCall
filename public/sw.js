@@ -1,4 +1,4 @@
-const CACHE = 'videocall-v10';
+const CACHE = 'videocall-v11';
 const ASSETS = [
   '/',
   '/index.html',

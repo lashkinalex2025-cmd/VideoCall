@@ -445,20 +445,21 @@
         return;
       }
 
+      var bust = '11';
       var s1 = document.createElement('script');
       s1.src = '/socket.io/socket.io.js';
       s1.onload = function () {
         var s2 = document.createElement('script');
         s2.type = 'module';
-        s2.src = 'js/app.js';
+        s2.src = 'js/app.js?v=' + bust;
         s2.onload = function () {
           var s3 = document.createElement('script');
           s3.type = 'module';
-          s3.src = 'js/admin.js';
+          s3.src = 'js/admin.js?v=' + bust;
           document.body.appendChild(s3);
           var s4 = document.createElement('script');
           s4.type = 'module';
-          s4.src = 'js/cabinet.js';
+          s4.src = 'js/cabinet.js?v=' + bust;
           document.body.appendChild(s4);
         };
         document.body.appendChild(s2);
